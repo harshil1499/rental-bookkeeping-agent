@@ -1,0 +1,20 @@
+# Secrets & all personally-identifying data (never commit):
+# service-account key, Drive config, bank CSVs, generated output
+private/
+# real property map / account numbers / servicers (use config.example.py)
+config.py
+
+# Operational docs with PII (property names, tenant, figures) — kept local, not published
+CLAUDE.md
+NOTES.md
+PRD.md
+
+# Material-participation hour tracking (out of scope for this repo)
+hours_capture.py
+hours_setup.py
+
+# Python / env
+.venv/
+__pycache__/
+*.pyc
+.claude/
