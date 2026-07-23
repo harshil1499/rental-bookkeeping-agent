@@ -102,7 +102,7 @@ def read_import(sheet):
         ws = sheet.worksheet(IMPORT_TAB)
     except Exception:
         return None
-    grid = ws.get("A1:I400")
+    grid = ws.get_all_values()  # get_all_values, not get() — get() returned ghost rows on these sheets
     rows = []
     for i, g in enumerate(grid, 1):
         g = (g + [""] * 9)[:9]
@@ -136,7 +136,7 @@ class TabWriter:
 
     def __init__(self, sheet, month):
         self.ws = sheet.worksheet(month)
-        self.grid = self.ws.get("A1:E250")
+        self.grid = self.ws.get_all_values()  # get_all_values, not get() — avoids ghost rows
         self.rows = [(g + [""] * 5)[:5] for g in self.grid]
         end = find_income_block_end(self.rows) or 2
         self.income_slots = [i for i in range(2, end)
@@ -195,7 +195,8 @@ def process_sheet(sheet_name, do_write):
     def current_line_value(month, label):
         if month not in tab_cache:
             try:
-                tab_cache[month] = [(g + [""] * 5)[:5] for g in sheet.worksheet(month).get("A1:E250")]
+                tab_cache[month] = [(g + [""] * 5)[:5]
+                                    for g in sheet.worksheet(month).get_all_values()]  # not get()
             except Exception:
                 tab_cache[month] = []
         grid = tab_cache[month]

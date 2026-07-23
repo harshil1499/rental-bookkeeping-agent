@@ -273,16 +273,52 @@ def print_preview(group):
     print(f"  -> {tally}  ({len(group['rows'])} total)")
 
 
+def read_existing_stamps(sheet):
+    """Preserve per-row Skip (col H) and Promoted (col I) marks across a tab rebuild.
+
+    write_staging deletes and recreates the Import tab, which would otherwise wipe both the
+    user's manual Skip opt-outs AND promote.py's '✓ promoted' idempotency stamps. Losing the
+    promoted stamp is the dangerous one: a re-import after a promote would make booked rows
+    look un-booked, leaving only amount-reconciliation to prevent a double-book. So we snapshot
+    those marks keyed by (date, payee, amount) — stable across deterministic re-imports — and
+    re-apply them after the rebuild. Returns {} if there's no existing Import tab.
+    """
+    try:
+        ws = sheet.worksheet(STAGING_TAB)
+    except Exception:
+        return {}
+    stamps = {}
+    for g in ws.get_all_values()[1:]:  # get_all_values (not get); skip header
+        date_s, payee, amount, _t, _c, _s, _n, skip, promoted = (g + [""] * 9)[:9]
+        if not (str(payee).strip() or str(amount).strip()):
+            continue  # blank spacer
+        if not (str(skip).strip() or str(promoted).strip()):
+            continue  # nothing to preserve on this row
+        try:
+            amt = round(abs(parse_money(amount)), 2)
+        except ValueError:
+            continue
+        stamps[(str(date_s).strip(), str(payee).strip(), amt)] = \
+            (str(skip).strip(), str(promoted).strip())
+    return stamps
+
+
 def write_staging(group):
     sheet = group["sheet"]
+    old_stamps = read_existing_stamps(sheet)  # snapshot before the tab is rebuilt
     blank = [""] * len(STAGING_HEADER)
     body = [STAGING_HEADER]
+    hi_updates = []  # (row_number, skip, promoted) marks to re-apply after rebuild
     for bi, block in enumerate(month_blocks(group["rows"])):
         if bi > 0:
             body.append(blank)  # spacer row between months
         for r in block:
             body.append([r["date_str"], r["payee"], r["amount"], r["type"],
                          r["category"], r["status"], r["note"]])
+            keep = old_stamps.get((str(r["date_str"]).strip(), str(r["payee"]).strip(),
+                                   round(abs(r["amount"]), 2)))
+            if keep:
+                hi_updates.append((len(body), keep[0], keep[1]))  # len(body) == this row's number
     try:
         sheet.del_worksheet(sheet.worksheet(STAGING_TAB))
     except Exception:
@@ -290,7 +326,12 @@ def write_staging(group):
     ws = sheet.add_worksheet(title=STAGING_TAB, rows=len(body) + 10, cols=9)  # +Skip(H)/Promoted(I)
     ws.update(f"A1:G{len(body)}", body, value_input_option="USER_ENTERED")
     ws.update("H1:I1", [["Skip", "Promoted"]], value_input_option="USER_ENTERED")
-    print(f"  ✓ Wrote {len(group['rows'])} rows to '{group['sheet_name']}' -> tab '{STAGING_TAB}'.")
+    if hi_updates:  # restore preserved Skip/Promoted marks
+        ws.batch_update([{"range": f"H{row}:I{row}", "values": [[skip, promoted]]}
+                         for row, skip, promoted in hi_updates],
+                        value_input_option="USER_ENTERED")
+    kept = f"  (preserved {len(hi_updates)} Skip/Promoted mark(s))" if hi_updates else ""
+    print(f"  ✓ Wrote {len(group['rows'])} rows to '{group['sheet_name']}' -> tab '{STAGING_TAB}'.{kept}")
 
 
 # ---------------- Main ----------------
