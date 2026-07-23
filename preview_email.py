@@ -247,8 +247,11 @@ def render_text(properties, n_book, h, needs, url):
     return "\n".join(L)
 
 
-def rows_table(book):
-    head = (f'<tr><th style="{TH}text-align:right;width:34px">#</th>'
+def rows_table(book, show_num=True):
+    """show_num=False for the post-booking receipt: the numbers exist so a reply can say
+    "skip 7", which is meaningless once the rows are already written."""
+    num_head = f'<th style="{TH}text-align:right;width:34px">#</th>' if show_num else ""
+    head = (f'<tr>{num_head}'
             f'<th style="{TH}">Date</th>'
             f'<th style="{TH}text-align:right">Amount</th>'
             f'<th style="{TH}">Category</th>'
@@ -257,9 +260,10 @@ def rows_table(book):
     for b in book:
         amt, inc = amount_of(b)
         colour = GREEN if inc else INK
+        num_cell = (f'<td style="{TD}text-align:right;font-family:{MONO};font-size:12px;'
+                    f'color:{FAINT}">{b["num"]}</td>') if show_num else ""
         body.append(
-            f'<tr>'
-            f'<td style="{TD}text-align:right;font-family:{MONO};font-size:12px;color:{FAINT}">{b["num"]}</td>'
+            f'<tr>{num_cell}'
             f'<td style="{TD}white-space:nowrap;color:{MUTED}">{esc(b["date"])}</td>'
             f'<td style="{TD}text-align:right;white-space:nowrap;font-family:{MONO};color:{colour}">{amt}</td>'
             f'<td style="{TD}">{esc(category_of(b))}</td>'

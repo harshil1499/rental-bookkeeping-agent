@@ -170,16 +170,116 @@ def run_promote():
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
 
 
-def send_summary(h, ok, output):
-    subject = f"{BOOKED_SUBJECT} [{h}]" if ok else f"{ERROR_SUBJECT} [{h}]"
-    lead = ("Booked. Here's what landed in the registers:" if ok else
-            "Booking FAILED — nothing may have been written. Details below; "
-            "re-run the workflow manually once it's fixed.")
+# --- What actually landed -------------------------------------------------------------------
+# Heavy imports stay INSIDE these functions on purpose: the module must import with stdlib only
+# so test_confirm_parser.py can run in CI before config.py has been materialized from secrets.
+
+def snapshot_bookable():
+    """-> (properties, keys) of what is about to book, classified exactly as the preview was."""
+    from preview_email import collect_preview
+    props, _n = collect_preview()
+    keys = {(p["label"], b["irow"]) for p in props for b in p["book"]}
+    return props, keys
+
+
+def promoted_keys():
+    """-> {(label, import row)} that now carry promote's '✓ promoted' stamp.
+
+    Comparing this against the pre-promote snapshot is what makes the receipt truthful: it
+    reports what the ledger actually took, not what we intended to send it. promote can decline
+    a row (e.g. it refuses to add onto an already non-zero named line), and that must show up.
+    """
+    import config
+    from capture import open_sheet
+    from promote import read_import
+    out = set()
+    for sheet_name in config.SHEETS:
+        res = read_import(open_sheet(sheet_name))
+        if not res:
+            continue
+        _ws, rows = res
+        label = config.INBOX_PROPS.get(sheet_name, sheet_name)
+        out |= {(label, r["irow"]) for r in rows if r["promoted"]}
+    return out
+
+
+def render_summary(props, booked, missed, output, ok):
+    """-> (n_booked, text, html) receipt, styled like the preview so it reads the same way."""
+    from preview_email import (FONT, INK, MUTED, FAINT, LINE, MONO,
+                               amount_of, category_of, esc, rows_table)
+
+    blocks, lines, n_booked, n_missed = [], [], 0, 0
+    for p in props:
+        took = [b for b in p["book"] if (p["label"], b["irow"]) in booked]
+        left = [b for b in p["book"] if (p["label"], b["irow"]) in missed]
+        if not took and not left:
+            continue
+        n_booked += len(took)
+        n_missed += len(left)
+        lines.append(p["label"])
+        lines.append("-" * len(p["label"]))
+        for b in took:
+            amt, _ = amount_of(b)
+            lines.append(f"  {b['date']:<10} {amt:>12}  {category_of(b):<26} {b['payee']}")
+        if not took:
+            lines.append("  (nothing booked)")
+        if left:
+            lines.append(f"  NOT booked ({len(left)}):")
+            for b in left:
+                amt, _ = amount_of(b)
+                lines.append(f"    {b['date']:<10} {amt:>12}  {category_of(b):<26} {b['payee']}")
+        lines.append("")
+
+        inner = rows_table(took, show_num=False) if took else (
+            f'<div style="font-size:14px;color:{MUTED};padding:4px 0 2px">Nothing booked.</div>')
+        warn = ""
+        if left:
+            warn = (f'<div style="margin:10px 0 0;padding:10px 12px;background:#fff8f0;'
+                    f'border:1px solid #f0c9a0;border-radius:6px">'
+                    f'<div style="font-size:12px;font-weight:600;text-transform:uppercase;'
+                    f'letter-spacing:.4px;color:#8a5a1a;margin-bottom:6px">'
+                    f'Not booked ({len(left)})</div>{rows_table(left, show_num=False)}</div>')
+        blocks.append(
+            f'<h3 style="font-size:14px;font-weight:600;margin:24px 0 8px;color:{INK}">'
+            f'{esc(p["label"])}</h3>{inner}{warn}')
+
+    if ok:
+        headline = (f'<strong>{n_booked}</strong> row{"" if n_booked == 1 else "s"} written to '
+                    f'your registers.' if n_booked else "Nothing was pending — nothing booked.")
+        head_text = (f"Booked {n_booked} row(s) into your registers."
+                     if n_booked else "Nothing was pending — nothing booked.")
+    else:
+        headline = ("<strong>Booking failed.</strong> Nothing may have been written — "
+                    "check the details below.")
+        head_text = "BOOKING FAILED — nothing may have been written."
+    if n_missed:
+        headline += (f' <span style="color:#8a5a1a">{n_missed} row'
+                     f'{"" if n_missed == 1 else "s"} did not book — see below.</span>')
+
+    text = f"{head_text}\n\n" + "\n".join(lines) + f"\n\n--- promote output ---\n{output}\n"
+    html = (
+        f'<div style="font-family:{FONT};color:{INK};background:#ffffff;font-size:15px;'
+        f'line-height:1.5;max-width:680px;margin:0 auto;padding:16px 18px 22px">'
+        f'<h2 style="font-size:19px;font-weight:600;margin:0 0 6px">'
+        f'{"Booked" if ok else "Booking failed"}</h2>'
+        f'<p style="margin:0;color:{MUTED};font-size:14px">{headline}</p>'
+        f'{"".join(blocks)}'
+        f'<h3 style="font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;'
+        f'color:{MUTED};margin:28px 0 8px;border-top:1px solid {LINE};padding-top:16px">'
+        f'Run log</h3>'
+        f'<pre style="font-family:{MONO};font-size:11.5px;line-height:1.45;color:{FAINT};'
+        f'white-space:pre-wrap;margin:0">{esc(output)}</pre>'
+        f'</div>')
+    return n_booked, text, html
+
+
+def send_summary(h, ok, text, html):
     msg = EmailMessage()
     msg["From"] = USER
     msg["To"] = USER
-    msg["Subject"] = subject
-    msg.set_content(f"{lead}\n\n{output}\n")
+    msg["Subject"] = f"{BOOKED_SUBJECT} [{h}]" if ok else f"{ERROR_SUBJECT} [{h}]"
+    msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
     ctx = ssl.create_default_context()
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls(context=ctx)
@@ -199,13 +299,17 @@ def main():
         return
 
     print(f"Confirm received for: {', '.join(pending)} — running promote --write ...")
+    before, keys = snapshot_bookable()      # must be captured BEFORE promote stamps anything
     code, output = run_promote()
     print(output)
+    stamped = promoted_keys() if code == 0 else set()
+    n_booked, text, html = render_summary(
+        before, keys & stamped, keys - stamped, output, ok=(code == 0))
     # promote books every eligible staged row at once, so it runs once regardless of how many
     # previews were confirmed; each hash still gets a summary so each is marked handled.
     for h in pending:
-        send_summary(h, code == 0, output)
-        print(f"{'Booked' if code == 0 else 'ERROR'} [{h}] — summary emailed.")
+        send_summary(h, code == 0, text, html)
+        print(f"{'Booked' if code == 0 else 'ERROR'} [{h}] — {n_booked} row(s), summary emailed.")
 
 
 if __name__ == "__main__":
