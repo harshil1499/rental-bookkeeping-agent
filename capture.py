@@ -186,7 +186,7 @@ def main():
     if args.accumulate_line:
         ss = open_sheet(sheet_name)
         ws = ss.worksheet(tab)
-        rows = ws.get("A1:E200")
+        rows = ws.get_all_values()  # not get() — get() returned ghost rows on these sheets
         line_row = find_named_line(rows, args.accumulate_line)
         if not line_row:
             sys.exit(f"No line named '{args.accumulate_line}' found in {sheet_name} / {tab}. "
@@ -220,7 +220,7 @@ def main():
     if args.dry_run:
         ss = open_sheet(sheet_name)
         ws = ss.worksheet(tab)
-        rows = ws.get("A1:E200")
+        rows = ws.get_all_values()  # not get() — get() returned ghost rows on these sheets
         if args.income:
             end = find_income_block_end(rows)
             target = None
@@ -240,7 +240,7 @@ def main():
     # ---- Real write ----
     ss = open_sheet(sheet_name)
     ws = ss.worksheet(tab)
-    rows = ws.get("A1:E200")
+    rows = ws.get_all_values()  # not get() — get() returned ghost rows on these sheets
 
     if args.income:
         end = find_income_block_end(rows)
