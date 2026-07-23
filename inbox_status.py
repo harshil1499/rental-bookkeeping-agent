@@ -14,6 +14,7 @@ import warnings; warnings.filterwarnings("ignore")
 import mortgage
 import appfolio
 import config
+import email_docs
 from import_relay import (drive_service, load_drive_config, list_inbox_files,
                           download_pdf_text, account_of, ACCOUNT_SHEETS)
 
@@ -32,7 +33,13 @@ def scan(svc=None, cfg=None):
     """
     cfg = cfg or load_drive_config()
     svc = svc or drive_service()
-    files = list_inbox_files(svc, cfg["inbox_folder_id"])
+    # Both input paths count as "arrived": files in the Drive inbox, and documents attached to
+    # an email reply. Drive wins a filename collision.
+    files = [{"name": f["name"], "kind": f["kind"], "id": f["id"], "text": None}
+             for f in list_inbox_files(svc, cfg["inbox_folder_id"])]
+    have = {f["name"] for f in files}
+    files += [{"name": s["name"], "kind": s["kind"], "id": None, "text": s["text"]}
+              for s in email_docs.fetch() if s["name"] not in have]
 
     by_prop = {p: {"csv_months": set(), "statements": [], "appfolio": False} for p in PROPS}
     csv_months = {}   # sheet -> set of month names present as a Relay CSV
@@ -52,7 +59,7 @@ def scan(svc=None, cfg=None):
                 unknown.append(f["name"])
             continue
         # PDF: mortgage statement, AppFolio, or other
-        text = download_pdf_text(svc, f["id"])
+        text = f["text"] if f["text"] is not None else download_pdf_text(svc, f["id"])
         mp = mortgage.parse_mortgage_pdf(text)
         if mp:
             by_prop[mp["sheet"]]["statements"].append((mp["month"], mp["amount"], f["name"]))

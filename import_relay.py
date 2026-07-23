@@ -41,6 +41,7 @@ from googleapiclient.discovery import build
 import mortgage
 import appfolio
 import config
+import email_docs
 from capture import open_sheet, suggest_category, parse_money  # shared normalized path
 
 CREDS_FILE = config.CREDS_FILE
@@ -366,13 +367,19 @@ def gather_sources(args):
         picked[m["name"]] = (m, False)
     for m in list_inbox_files(svc, cfg["inbox_folder_id"]):
         picked[m["name"]] = (m, True)
-    if not picked:
-        sys.exit("Drive inbox is empty — drop Relay CSVs / mortgage PDFs into 'Relay Imports'.")
+    # Second input path: documents attached to an email reply (see email_docs). Not an error
+    # for the Drive inbox to be empty if the month's files were emailed in instead.
+    emailed = email_docs.fetch()
+    if not picked and not emailed:
+        sys.exit("Drive inbox is empty — drop Relay CSVs / mortgage PDFs into 'Relay Imports', "
+                 "or reply to the reminder with them attached.")
     srcs = []
     for name, (m, movable) in picked.items():
         text = download_pdf_text(svc, m["id"]) if m["kind"] == "pdf" else download_csv_text(svc, m)
         srcs.append({"name": name, "kind": m["kind"], "text": text,
                      "file_id": m["id"], "movable": movable})
+    # Drive wins a filename collision — putting a file in the inbox is the more deliberate act.
+    srcs.extend(s for s in emailed if s["name"] not in picked)
     return srcs, svc, cfg
 
 

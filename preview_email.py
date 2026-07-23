@@ -33,6 +33,7 @@ from email.message import EmailMessage
 warnings.filterwarnings("ignore")
 
 import config
+import email_docs
 import inbox_status
 from promote import read_import, resolve
 from capture import open_sheet
@@ -62,7 +63,10 @@ LEGEND = [
 # ---------------- Idempotency (mailbox as state) ----------------
 
 def inbox_fileset(svc, cfg):
-    return sorted(f["name"] for f in list_inbox_files(svc, cfg["inbox_folder_id"]))
+    """Everything that has arrived by either path — a newly emailed document changes the
+    hash exactly like a newly uploaded one, so it triggers a fresh preview."""
+    names = {f["name"] for f in list_inbox_files(svc, cfg["inbox_folder_id"])}
+    return sorted(names | set(email_docs.names()))
 
 
 def inbox_url(cfg):
