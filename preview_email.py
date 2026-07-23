@@ -82,7 +82,7 @@ def already_previewed(h):
     try:
         m.login(USER, PW)
         m.select("INBOX")
-        typ, data = m.search(None, "SUBJECT", f"[{h}]")
+        typ, data = m.search(None, "SUBJECT", f'"[{h}]"')  # quoted: IMAP rejects some bare terms
         return typ == "OK" and bool(data and data[0].split())
     finally:
         try:

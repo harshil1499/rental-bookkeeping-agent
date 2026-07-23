@@ -58,6 +58,12 @@ QUOTE_RE = re.compile(
     r"^\s*(>|on .+wrote:|-+\s*original message|from:\s|sent from |bookkeeping preview\b)", re.I)
 
 
+def q(s):
+    """Quote an IMAP search term. Required for anything with a space or '@' — an unquoted
+    multi-word term is parsed as separate tokens and the server answers BAD."""
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def imap_connect():
     m = imaplib.IMAP4_SSL("imap.gmail.com")
     m.login(USER, PW)
@@ -112,7 +118,7 @@ def intent(body):
 def subjects_matching(m, needle):
     """-> set of hashes found in subjects containing `needle`."""
     out = set()
-    typ, data = m.search(None, "SUBJECT", needle)
+    typ, data = m.search(None, "SUBJECT", q(needle))
     if typ != "OK" or not data or not data[0]:
         return out
     for num in data[0].split():
@@ -132,7 +138,7 @@ def handled_hashes(m):
 
 def pending_confirmations(m):
     """-> hashes the owner replied `confirm` to that haven't been handled yet."""
-    typ, data = m.search(None, "FROM", USER, "SUBJECT", PREVIEW_SUBJECT)
+    typ, data = m.search(None, "FROM", q(USER), "SUBJECT", q(PREVIEW_SUBJECT))
     if typ != "OK" or not data or not data[0]:
         return []
     handled, found = handled_hashes(m), []
