@@ -33,6 +33,7 @@ from email.message import EmailMessage
 warnings.filterwarnings("ignore")
 
 import config
+import inbox_status
 from promote import read_import, resolve
 from capture import open_sheet
 from import_relay import drive_service, load_drive_config, list_inbox_files
@@ -60,10 +61,15 @@ LEGEND = [
 
 # ---------------- Idempotency (mailbox as state) ----------------
 
-def inbox_fileset():
-    svc = drive_service()
-    cfg = load_drive_config()
+def inbox_fileset(svc, cfg):
     return sorted(f["name"] for f in list_inbox_files(svc, cfg["inbox_folder_id"]))
+
+
+def inbox_url(cfg):
+    """Deep link to the Drive inbox. Built from drive_config at run time — the folder ID is a
+    secret and must never be hardcoded in this (public) repo."""
+    fid = cfg.get("inbox_folder_id")
+    return f"https://drive.google.com/drive/folders/{fid}" if fid else None
 
 
 def fileset_hash(names):
@@ -99,6 +105,18 @@ def stage_import_tabs():
     return True
 
 
+def skip_bucket(reason):
+    """Group promote's skip reasons into buckets that mean different things to a human.
+    Lumping them into one 'skipped' number is misleading: 'already booked' needs no action,
+    'held' means a file is missing, 'excluded' is by design (transfers, superseded drafts)."""
+    r = (reason or "").lower()
+    if r.startswith("already"):   # already promoted / already in register
+        return "booked"
+    if r.startswith("held"):      # awaiting its statement or CSV
+        return "held"
+    return "excluded"             # superseded draft / transfer / you marked Skip
+
+
 def collect_preview():
     """-> (properties, n_book). Classifies each staged Import row exactly as promote will."""
     properties, n = [], 0
@@ -107,22 +125,49 @@ def collect_preview():
         if not res:
             continue
         _ws, rows = res
-        book, held, attention = [], 0, 0
+        book = []
+        counts = {"booked": 0, "held": 0, "excluded": 0, "attention": 0}
         for r in rows:
-            action, _target = resolve(r)
+            action, target = resolve(r)
             if action in ACTION_BOOK:
                 n += 1
                 book.append({"num": n, "action": action, **r})
             elif action == "ask":
-                attention += 1
+                counts["attention"] += 1
             else:
-                held += 1
-        if book or held or attention:
+                counts[skip_bucket(target)] += 1
+        if book or any(counts.values()):
             properties.append({
                 "label": config.INBOX_PROPS.get(sheet_name, sheet_name),
-                "book": book, "held": held, "attention": attention,
+                "book": book, "counts": counts,
             })
     return properties, n
+
+
+def collect_needs(scan):
+    """-> [(property label, [things still missing])] from the shared inbox scan, so the email
+    answers 'what do I drop?' and not just 'what would book?'."""
+    out = []
+    by_prop, csv_months = scan["by_prop"], scan["csv_months"]
+    for sheet, label in config.INBOX_PROPS.items():
+        b = by_prop.get(sheet)
+        if not b:
+            continue
+        items = []
+        drafted = csv_months.get(sheet, set())
+        held = {mon for mon, _amt, _name in b["statements"] if mon not in drafted}
+        if held:
+            # chronological, not alphabetical — "July, August", never "August, July"
+            months = sorted(held, key=lambda m: inbox_status.MONTHS.index(m)
+                            if m in inbox_status.MONTHS else 99)
+            plural = "" if len(held) == 1 else "s"
+            items.append(f"Relay CSV for {', '.join(months)} — {len(held)} mortgage "
+                         f"statement{plural} waiting on it")
+        if sheet == config.INBOX_APPFOLIO_SHEET and not b["appfolio"]:
+            items.append("AppFolio owner-statement export")
+        if items:
+            out.append((label, items))
+    return out
 
 
 # ---------------- Render + send ----------------
@@ -157,15 +202,13 @@ def category_of(row):
 
 
 def flags_of(p):
-    f = []
-    if p["held"]:
-        f.append(f"{p['held']} held/duplicate, auto-skipped")
-    if p["attention"]:
-        f.append(f"{p['attention']} need attention")
-    return f
+    c = p["counts"]
+    labels = [("booked", "already booked"), ("held", "held, waiting on a file"),
+              ("excluded", "excluded"), ("attention", "need attention")]
+    return [f"{c[k]} {text}" for k, text in labels if c[k]]
 
 
-def render_text(properties, n_book, h):
+def render_text(properties, n_book, h, needs, url):
     """Plain-text fallback for clients that don't render HTML."""
     L = [f"Bookkeeping preview - {n_book} row(s) ready to book.",
          "Nothing is booked until you reply 'confirm'.", ""]
@@ -182,6 +225,15 @@ def render_text(properties, n_book, h):
         flags = flags_of(p)
         if flags:
             L.append(f"  {' | '.join(flags)}")
+        L.append("")
+    if needs:
+        L.append("STILL NEEDED")
+        for label, items in needs:
+            L.append(f"  {label}")
+            for it in items:
+                L.append(f"    - {it}")
+        if url:
+            L.append(f"  Drop files in the Relay Imports inbox: {url}")
         L.append("")
     L.append("Reply to book:")
     for cmd, desc in LEGEND:
@@ -223,7 +275,29 @@ def legend_table():
     return f'<table role="presentation" cellpadding="0" cellspacing="0" style="{TABLE}">{rows}</table>'
 
 
-def render_html(properties, n_book, h):
+def needs_block(needs, url):
+    """The 'what do I actually drop?' section — the useful half when nothing is bookable."""
+    if not needs and not url:
+        return ""
+    items = []
+    for label, things in needs:
+        lis = "".join(f'<li style="margin:2px 0">{esc(t)}</li>' for t in things)
+        items.append(
+            f'<div style="margin:0 0 10px">'
+            f'<div style="font-size:13.5px;font-weight:600;color:{INK}">{esc(label)}</div>'
+            f'<ul style="margin:4px 0 0;padding-left:20px;font-size:13.5px;color:{MUTED}">{lis}</ul>'
+            f'</div>')
+    link = (f'<a href="{esc(url)}" style="color:#0969da;text-decoration:underline;'
+            f'font-size:13.5px">Open the Relay Imports inbox &rarr;</a>') if url else ""
+    heading = ("Still needed" if needs else "Drive inbox")
+    return (f'<div style="margin:24px 0 0;padding:14px 16px;background:#fbfcfd;'
+            f'border:1px solid {LINE};border-radius:8px">'
+            f'<div style="font-size:12px;font-weight:600;letter-spacing:.4px;'
+            f'text-transform:uppercase;color:{MUTED};margin:0 0 10px">{heading}</div>'
+            f'{"".join(items)}{link}</div>')
+
+
+def render_html(properties, n_book, h, needs, url):
     blocks = []
     for p in properties:
         inner = rows_table(p["book"]) if p["book"] else (
@@ -236,8 +310,8 @@ def render_html(properties, n_book, h):
             f'{esc(p["label"])}</h3>{inner}{note}')
     plural = "" if n_book == 1 else "s"
     headline = (f'<strong>{n_book}</strong> row{plural} ready to book' if n_book
-                else "Nothing new to book right now")
-    body = "".join(blocks)
+                else "Nothing new to book yet")
+    body = "".join(blocks) + needs_block(needs, url)
     # An explicit background is required, not cosmetic: without it, a dark-themed client
     # (Gmail dark mode) paints its own dark canvas behind this hardcoded dark text and the
     # headings/expense amounts become unreadable.
@@ -270,7 +344,9 @@ def send(subject, text, html):
 
 
 def main():
-    names = inbox_fileset()
+    cfg = load_drive_config()
+    svc = drive_service()
+    names = inbox_fileset(svc, cfg)
     if not names:
         print("Inbox empty — nothing to preview.")
         return
@@ -285,9 +361,14 @@ def main():
     if not properties:
         print("Nothing to preview after staging — no email sent.")
         return
+    needs = collect_needs(inbox_status.scan(svc, cfg))
+    url = inbox_url(cfg)
     subject = f"Bookkeeping preview — {n_book} to book [{h}]"
-    send(subject, render_text(properties, n_book, h), render_html(properties, n_book, h))
-    print(f"Preview sent to {TO} — {n_book} row(s) to book, set [{h}].")
+    send(subject,
+         render_text(properties, n_book, h, needs, url),
+         render_html(properties, n_book, h, needs, url))
+    print(f"Preview sent to {TO} — {n_book} row(s) to book, "
+          f"{len(needs)} propert{'y' if len(needs) == 1 else 'ies'} still needing files, set [{h}].")
 
 
 if __name__ == "__main__":

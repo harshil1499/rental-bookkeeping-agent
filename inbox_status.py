@@ -8,6 +8,7 @@ Writes nothing, moves nothing — safe to run any time (including from a schedul
 
     python3 inbox_status.py
 """
+import re
 import warnings; warnings.filterwarnings("ignore")
 
 import mortgage
@@ -18,14 +19,21 @@ from import_relay import (drive_service, load_drive_config, list_inbox_files,
 
 # Property sheet -> display label (from config.py).
 PROPS = config.INBOX_PROPS
+MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
+          "September", "October", "November", "December"]
 
 
-def main():
-    cfg = load_drive_config()
-    svc = drive_service()
+def scan(svc=None, cfg=None):
+    """Read-only bucketing of the Drive inbox by property.
+
+    Shared by this CLI snapshot and preview_email.py so both describe "what's still needed"
+    from the same logic. Returns {by_prop, csv_months, unknown, n_files}, where a statement is
+    'held' when its month has no matching Relay CSV on hand.
+    """
+    cfg = cfg or load_drive_config()
+    svc = svc or drive_service()
     files = list_inbox_files(svc, cfg["inbox_folder_id"])
 
-    # Bucket everything by property.
     by_prop = {p: {"csv_months": set(), "statements": [], "appfolio": False} for p in PROPS}
     csv_months = {}   # sheet -> set of month names present as a Relay CSV
     unknown = []
@@ -36,12 +44,8 @@ def main():
             if acct in ACCOUNT_SHEETS:
                 sheet = ACCOUNT_SHEETS[acct][0]
                 # month from filename "Relay YYYY-MM-01 #acct.csv" if present
-                import re
                 m = re.search(r"(\d{4})-(\d{2})", f["name"])
-                mon = None
-                if m:
-                    mon = ["January","February","March","April","May","June","July","August",
-                           "September","October","November","December"][int(m.group(2)) - 1]
+                mon = MONTHS[int(m.group(2)) - 1] if m else None
                 by_prop[sheet]["csv_months"].add(mon or f["name"])
                 csv_months.setdefault(sheet, set()).add(mon)
             else:
@@ -59,10 +63,19 @@ def main():
             continue
         unknown.append(f["name"])
 
+    return {"by_prop": by_prop, "csv_months": csv_months,
+            "unknown": unknown, "n_files": len(files)}
+
+
+def main():
+    s = scan()
+    by_prop, csv_months, unknown, n_files = (
+        s["by_prop"], s["csv_months"], s["unknown"], s["n_files"])
+
     print("=" * 68)
     print(" RENTAL BOOKKEEPING — Drive inbox snapshot")
     print("=" * 68)
-    if not files:
+    if not n_files:
         print("\n  Inbox is EMPTY. Nothing to book — upload this month's Relay CSVs +\n"
               "  mortgage statements (+ AppFolio export for Indy) when they're ready.\n")
         return
