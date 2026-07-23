@@ -40,6 +40,9 @@ from import_relay import drive_service, load_drive_config, list_inbox_files
 USER = os.environ["GMAIL_USER"]
 PW = os.environ["GMAIL_APP_PASSWORD"]
 TO = os.environ.get("PREVIEW_TO", USER)
+# FORCE=1 re-sends even if this inbox set was already previewed (manual testing only —
+# the scheduled runs must never set it, or every poll would email).
+FORCE = os.environ.get("FORCE", "").strip().lower() in ("1", "true", "yes")
 SHEETS = config.SHEETS
 HERE = os.path.dirname(os.path.abspath(__file__)) or "."
 ACTION_BOOK = ("income", "accumulate", "variable")
@@ -123,46 +126,142 @@ def collect_preview():
 
 
 # ---------------- Render + send ----------------
+# Email clients ignore <style> blocks and external CSS unpredictably, so every rule here is
+# inlined. Tables use role="presentation" so screen readers treat them as layout, not data.
+
+FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+INK, MUTED, FAINT = "#1f2328", "#57606a", "#8b949e"
+LINE, HAIR = "#d9dee3", "#eceff2"
+GREEN = "#1a7f37"
+
+TH = (f"padding:7px 10px;text-align:left;font-size:11px;font-weight:600;letter-spacing:.4px;"
+      f"text-transform:uppercase;color:{MUTED};border-bottom:1px solid {LINE};")
+TD = f"padding:8px 10px;border-bottom:1px solid {HAIR};vertical-align:top;"
+TABLE = "width:100%;border-collapse:collapse;font-size:14px;"
+
+
+def esc(s):
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def amount_of(row):
+    """-> (formatted amount, is_income). Register stores magnitudes; type carries direction."""
+    inc = row["type"] == "Income"
+    sign = "+" if inc else "-"
+    return f"{sign}{abs(row['amount']):,.2f}", inc
+
+
+def category_of(row):
+    return "income" if row["action"] == "income" else (row["category"] or "-")
+
+
+def flags_of(p):
+    f = []
+    if p["held"]:
+        f.append(f"{p['held']} held/duplicate, auto-skipped")
+    if p["attention"]:
+        f.append(f"{p['attention']} need attention")
+    return f
+
 
 def render_text(properties, n_book, h):
-    L = [f"Bookkeeping preview — {n_book} row(s) ready to book. "
-         f"Nothing is booked until you reply 'confirm'.", ""]
+    """Plain-text fallback for clients that don't render HTML."""
+    L = [f"Bookkeeping preview - {n_book} row(s) ready to book.",
+         "Nothing is booked until you reply 'confirm'.", ""]
     for p in properties:
-        L.append(f"> {p['label']}")
-        for b in p["book"]:
-            sign = "+" if b["type"] == "Income" else "-"
-            cat = "income" if b["action"] == "income" else (b["category"] or "-")
-            L.append(f"   {b['num']:>3}. {b['date']:<10} {sign}{abs(b['amount']):>9.2f}  "
-                     f"{cat:<26} {b['payee']}")
-        if not p["book"]:
-            L.append("     (nothing new to book)")
-        flags = []
-        if p["held"]:
-            flags.append(f"{p['held']} held/duplicate (auto-skipped)")
-        if p["attention"]:
-            flags.append(f"{p['attention']} need attention")
+        L.append(p["label"])
+        L.append("-" * len(p["label"]))
+        if p["book"]:
+            for b in p["book"]:
+                amt, _ = amount_of(b)
+                L.append(f"  {b['num']:>3}. {b['date']:<10} {amt:>12}  "
+                         f"{category_of(b):<26} {b['payee']}")
+        else:
+            L.append("  (nothing new to book)")
+        flags = flags_of(p)
         if flags:
-            L.append(f"     [{', '.join(flags)}]")
+            L.append(f"  {' | '.join(flags)}")
         L.append("")
     L.append("Reply to book:")
     for cmd, desc in LEGEND:
-        L.append(f"   {cmd:<24} {desc}")
+        L.append(f"  {cmd:<24} {desc}")
     L.append("")
     L.append(f"(ref {h})")
     return "\n".join(L)
 
 
-def send(subject, text):
+def rows_table(book):
+    head = (f'<tr><th style="{TH}text-align:right;width:34px">#</th>'
+            f'<th style="{TH}">Date</th>'
+            f'<th style="{TH}text-align:right">Amount</th>'
+            f'<th style="{TH}">Category</th>'
+            f'<th style="{TH}">Payee</th></tr>')
+    body = []
+    for b in book:
+        amt, inc = amount_of(b)
+        colour = GREEN if inc else INK
+        body.append(
+            f'<tr>'
+            f'<td style="{TD}text-align:right;font-family:{MONO};font-size:12px;color:{FAINT}">{b["num"]}</td>'
+            f'<td style="{TD}white-space:nowrap;color:{MUTED}">{esc(b["date"])}</td>'
+            f'<td style="{TD}text-align:right;white-space:nowrap;font-family:{MONO};color:{colour}">{amt}</td>'
+            f'<td style="{TD}">{esc(category_of(b))}</td>'
+            f'<td style="{TD}">{esc(b["payee"])}</td>'
+            f'</tr>')
+    rows = head + "".join(body)
+    return f'<table role="presentation" cellpadding="0" cellspacing="0" style="{TABLE}">{rows}</table>'
+
+
+def legend_table():
+    chip = (f"font-family:{MONO};font-size:12.5px;background:#f2f4f6;"
+            f"border:1px solid {HAIR};border-radius:5px;padding:2px 6px;white-space:nowrap")
+    rows = "".join(
+        f'<tr><td style="{TD}white-space:nowrap"><code style="{chip}">{esc(cmd)}</code></td>'
+        f'<td style="{TD}color:{MUTED}">{esc(desc)}</td></tr>'
+        for cmd, desc in LEGEND)
+    return f'<table role="presentation" cellpadding="0" cellspacing="0" style="{TABLE}">{rows}</table>'
+
+
+def render_html(properties, n_book, h):
+    blocks = []
+    for p in properties:
+        inner = rows_table(p["book"]) if p["book"] else (
+            f'<div style="font-size:14px;color:{MUTED};padding:4px 0 2px">Nothing new to book.</div>')
+        flags = flags_of(p)
+        note = (f'<div style="font-size:12.5px;color:{FAINT};margin:6px 0 0">'
+                f'{esc(" · ".join(flags))}</div>') if flags else ""
+        blocks.append(
+            f'<h3 style="font-size:14px;font-weight:600;margin:24px 0 8px;color:{INK}">'
+            f'{esc(p["label"])}</h3>{inner}{note}')
+    plural = "" if n_book == 1 else "s"
+    headline = (f'<strong>{n_book}</strong> row{plural} ready to book' if n_book
+                else "Nothing new to book right now")
+    body = "".join(blocks)
+    # An explicit background is required, not cosmetic: without it, a dark-themed client
+    # (Gmail dark mode) paints its own dark canvas behind this hardcoded dark text and the
+    # headings/expense amounts become unreadable.
+    return (
+        f'<div style="font-family:{FONT};color:{INK};background:#ffffff;font-size:15px;'
+        f'line-height:1.5;max-width:680px;margin:0 auto;padding:16px 18px 22px">'
+        f'<h2 style="font-size:19px;font-weight:600;margin:0 0 6px">Bookkeeping preview</h2>'
+        f'<p style="margin:0;color:{MUTED};font-size:14px">{headline} — nothing is booked '
+        f'until you reply <strong style="color:{INK}">confirm</strong>.</p>'
+        f'{body}'
+        f'<h3 style="font-size:14px;font-weight:600;margin:28px 0 8px;'
+        f'border-top:1px solid {LINE};padding-top:16px">Reply to book</h3>'
+        f'{legend_table()}'
+        f'<p style="margin:18px 0 0;font-size:11.5px;color:{FAINT}">ref {esc(h)}</p>'
+        f'</div>')
+
+
+def send(subject, text, html):
     msg = EmailMessage()
     msg["From"] = USER
     msg["To"] = TO
     msg["Subject"] = subject
-    msg.set_content(text)
-    # Monospace HTML alternative so the numbered columns line up in most clients.
-    esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    msg.add_alternative(
-        f'<pre style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;'
-        f'line-height:1.45;color:#1f2328">{esc}</pre>', subtype="html")
+    msg.set_content(text)                       # plain-text fallback
+    msg.add_alternative(html, subtype="html")   # preferred rendering
     ctx = ssl.create_default_context()
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls(context=ctx)
@@ -176,7 +275,7 @@ def main():
         print("Inbox empty — nothing to preview.")
         return
     h = fileset_hash(names)
-    if already_previewed(h):
+    if not FORCE and already_previewed(h):
         print(f"Preview for inbox set [{h}] already in mailbox — skipping.")
         return
     if not stage_import_tabs():
@@ -187,7 +286,7 @@ def main():
         print("Nothing to preview after staging — no email sent.")
         return
     subject = f"Bookkeeping preview — {n_book} to book [{h}]"
-    send(subject, render_text(properties, n_book, h))
+    send(subject, render_text(properties, n_book, h), render_html(properties, n_book, h))
     print(f"Preview sent to {TO} — {n_book} row(s) to book, set [{h}].")
 
 
