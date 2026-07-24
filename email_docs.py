@@ -32,6 +32,8 @@ warnings.filterwarnings("ignore")
 
 import fitz  # pymupdf, to read attached statement PDFs
 
+import mailbox_state
+
 USER = os.environ.get("GMAIL_USER", "")
 PW = os.environ.get("GMAIL_APP_PASSWORD", "")
 
@@ -97,20 +99,14 @@ def fetch():
     try:
         m = imaplib.IMAP4_SSL("imap.gmail.com")
         m.login(USER, PW)
-        m.select("INBOX")
-        seen = set()
+        # Searched across archive and trash, not just INBOX. These attachments are pipeline
+        # INPUTS, and the docstring above promises they stay in the dataset permanently —
+        # an INBOX-only read would quietly break that the first time you archive the email
+        # you sent them on, silently shrinking the batch you then confirm.
         for marker in SUBJECT_MARKERS:
-            typ, data = m.search(None, "FROM", _q(USER), "SUBJECT", _q(marker))
-            if typ != "OK" or not data or not data[0]:
-                continue
-            for num in data[0].split():
-                if num in seen:
-                    continue
-                seen.add(num)
-                typ, raw = m.fetch(num, "(RFC822)")
-                if typ != "OK" or not raw or not raw[0]:
-                    continue
-                msg = emaillib.message_from_bytes(raw[0][1])
+            for raw in mailbox_state.fetch(
+                    m, ("FROM", _q(USER), "SUBJECT", _q(marker)), "(RFC822)"):
+                msg = emaillib.message_from_bytes(raw)
                 if USER.lower() not in str(msg.get("From", "")).lower():
                     continue  # only the owner's own mail
                 for name, kind, text in _attachments(msg):

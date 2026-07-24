@@ -42,6 +42,10 @@ from email.message import EmailMessage
 
 warnings.filterwarnings("ignore")
 
+# Stdlib-only itself, so it may be imported at module level — the parser tests run in CI
+# before config.py exists, and this module has to stay importable without it.
+import mailbox_state
+
 USER = os.environ["GMAIL_USER"]
 PW = os.environ["GMAIL_APP_PASSWORD"]
 HERE = os.path.dirname(os.path.abspath(__file__)) or "."
@@ -116,16 +120,15 @@ def intent(body):
 
 
 def subjects_matching(m, needle):
-    """-> set of hashes found in subjects containing `needle`."""
+    """-> set of hashes found in subjects containing `needle`, anywhere in the account.
+
+    This answers "did I already book this?", so it has to survive you tidying your inbox —
+    a receipt you archived or deleted still means the batch was booked. Searching INBOX
+    alone would let a deleted receipt re-open a batch that already hit the ledger.
+    """
     out = set()
-    typ, data = m.search(None, "SUBJECT", q(needle))
-    if typ != "OK" or not data or not data[0]:
-        return out
-    for num in data[0].split():
-        typ, raw = m.fetch(num, "(BODY[HEADER.FIELDS (SUBJECT)])")
-        if typ != "OK" or not raw or not raw[0]:
-            continue
-        found = HASH_RE.search(raw[0][1].decode("utf-8", "replace"))
+    for raw in mailbox_state.fetch(m, ("SUBJECT", q(needle)), "(BODY[HEADER.FIELDS (SUBJECT)])"):
+        found = HASH_RE.search(raw.decode("utf-8", "replace"))
         if found:
             out.add(found.group(1))
     return out
@@ -137,11 +140,21 @@ def handled_hashes(m):
 
 
 def pending_confirmations(m):
-    """-> hashes the owner replied `confirm` to that haven't been handled yet."""
+    """-> hashes the owner replied `confirm` to that haven't been handled yet.
+
+    INBOX-only, deliberately, while `handled_hashes` searches everywhere. This is the one
+    read that leads to a ledger write, so it stays as narrow as possible: deleting a preview
+    withdraws it. The asymmetry is the safe direction — forgetting a receipt could double-book,
+    forgetting a preview just means nothing happens.
+    """
+    # handled_hashes() FIRST, because it selects other folders and comes back. IMAP sequence
+    # numbers are scoped to a SELECT, so searching INBOX and then re-selecting it mid-loop
+    # could renumber the results underneath us if mail arrived in between — and this loop
+    # ends in a ledger write. Gather the cross-folder state, then search INBOX and use it.
+    handled, found = handled_hashes(m), []
     typ, data = m.search(None, "FROM", q(USER), "SUBJECT", q(PREVIEW_SUBJECT))
     if typ != "OK" or not data or not data[0]:
         return []
-    handled, found = handled_hashes(m), []
     for num in data[0].split():
         typ, raw = m.fetch(num, "(RFC822)")
         if typ != "OK" or not raw or not raw[0]:

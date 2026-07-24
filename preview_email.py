@@ -5,13 +5,16 @@ preview_email.py — stage the Import tabs and email a numbered preview of what 
 Step 2 of the automation roadmap ("drop files -> get a preview"). Intended to run on a schedule
 after documents land in the Drive "Relay Imports" inbox:
 
-  1. Hash the current inbox file set. If a preview for that exact set is already in the mailbox,
-     exit — no re-stage, no re-nag. (Held statements that sit in the inbox waiting on their CSV
-     don't re-trigger; the hash only changes when a file is added or removed.)
+  1. Hash the current inbox file set. If a preview for that exact set was ever sent — including
+     one since archived or deleted — exit: no re-stage, no re-nag. (Held statements that sit in
+     the inbox waiting on their CSV don't re-trigger; the hash only changes when a file is added
+     or removed.)
   2. Otherwise stage the Import tabs (`import_relay.py --rebuild` — writes the scratch Import tab
      only, moves no files, preserves Skip/Promoted marks) and email a numbered, per-property
      preview of what `promote` would book, plus the reply-command legend. The file-set hash goes
      in the subject so the next run can tell it was already sent.
+  3. If nothing is bookable, send NOTHING. A "0 to book" email asks nothing of you, and the
+     1st-of-month reminder is what chases the missing files.
 
 NO ledger write and NO file moves happen here. The human still gates booking — step 3 will parse
 the `confirm` reply and run promote. Row numbering is global and deterministic (SHEETS order, then
@@ -35,6 +38,7 @@ warnings.filterwarnings("ignore")
 import config
 import email_docs
 import inbox_status
+import mailbox_state
 from promote import read_import, resolve
 from capture import open_sheet
 from import_relay import drive_service, load_drive_config, list_inbox_files
@@ -81,13 +85,13 @@ def fileset_hash(names):
 
 
 def already_previewed(h):
-    """True if a preview email for this exact inbox set is already in the mailbox."""
+    """True if a preview email for this exact inbox set was ever sent — including one you
+    have since archived or deleted. Searching INBOX alone made emptying the trash look like
+    'never previewed', which re-sent an identical email; see mailbox_state.py."""
     m = imaplib.IMAP4_SSL("imap.gmail.com")
     try:
         m.login(USER, PW)
-        m.select("INBOX")
-        typ, data = m.search(None, "SUBJECT", f'"[{h}]"')  # quoted: IMAP rejects some bare terms
-        return typ == "OK" and bool(data and data[0].split())
+        return mailbox_state.exists(m, "SUBJECT", mailbox_state.q(f"[{h}]"))
     finally:
         try:
             m.logout()
@@ -368,6 +372,16 @@ def main():
     properties, n_book = collect_preview()
     if not properties:
         print("Nothing to preview after staging — no email sent.")
+        return
+    if not n_book:
+        # An email that says "0 to book" asks nothing of you. Held statements waiting on their
+        # Relay CSV sit here for weeks, and every one of those runs would otherwise be an email.
+        # Silence is correct: the 1st-of-month reminder is what asks for the missing files, and
+        # a failure alert is what breaks the silence if the automation itself is down.
+        # Cost of staying quiet: nothing records this file set, so the next poll re-stages the
+        # Import tabs (scratch tab only, never the ledger). Cheap, and it stops the moment
+        # anything is bookable — that sends one email, and the hash gate closes for good.
+        print(f"Nothing to book for inbox set [{h}] — staged only, no email sent.")
         return
     needs = collect_needs(inbox_status.scan(svc, cfg))
     url = inbox_url(cfg)
