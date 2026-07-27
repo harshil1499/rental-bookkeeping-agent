@@ -17,8 +17,8 @@ because nothing was left to prove it had already gone out.
 So a state lookup runs over the account's \\All folder (inbox + archived + sent) and its
 \\Trash folder, which between them cover everywhere a past message can be. Both are
 discovered from the server's LIST response rather than hardcoded: Gmail localizes these
-names ("[Gmail]/All Mail" is "[Gmail]/Papelera" on a Spanish account) and encodes them in
-modified UTF-7, so the bytes the server hands back are the only reliable spelling.
+names and encodes them in modified UTF-7, so the bytes the server hands back are the only
+reliable spelling. Discovery keys off the RFC 6154 \\All / \\Trash flags, never the text.
 
 Deliberately NOT used for reading the `confirm` reply. That is the one path that writes to
 the ledger, and it stays INBOX-only so that deleting a preview withdraws it.
