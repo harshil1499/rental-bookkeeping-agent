@@ -10,6 +10,9 @@ Built to replace the manual, error-prone spreadsheet bookkeeping I was doing acr
 short-term and long-term rentals. *(Property names, account numbers, and figures are
 placeholders here; the real values live in a gitignored config.)*
 
+<p align="center"><img src="docs/preview-demo.png" alt="Bookkeeping preview email, rendered from this repo's own preview_email.py against fabricated data" width="640"></p>
+<p align="center"><sub>The transaction tables and reply-command logic above are this repo's actual <code>preview_email.py</code> rendering code, run unmodified — only the property names, dates, and dollar amounts are fabricated for this screenshot. The card chrome and status-color badges are illustrative styling layered on top for this README, not part of the shipped email.</sub></p>
+
 ---
 
 ## The problem
