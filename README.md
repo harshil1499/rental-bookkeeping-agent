@@ -61,6 +61,34 @@ flowchart LR
 | Staging → ledger | `promote.py` | Promotes reviewed rows into the month registers; idempotent |
 | Monthly status | `inbox_status.py` | Read-only snapshot: what's staged, held, or missing per property |
 
+## How the monthly close runs (hands-off)
+
+The commands further down are the engine. In practice it runs without a keyboard: a scheduled
+job — GitHub Actions, no server, no laptop — drives the whole close over email, so closing a
+month is a reply from a phone.
+
+```mermaid
+flowchart LR
+    T["1st of month:<br/>reminder email"] --> D["Drop the month's files<br/>(cloud inbox OR email reply)"]
+    D --> P["Preview email:<br/>numbered, per-property"]
+    P --> C["Reply 'confirm'"]
+    C --> B["Booked receipt"]
+```
+
+- **Serverless and phone-only.** The pipeline runs on a schedule in CI; nothing has to stay
+  running on a laptop. Files go in either by dropping them in a cloud inbox folder *or* by
+  replying to the reminder with them attached — both feed the same staging → preview → confirm
+  flow.
+- **It speaks only when there's something to do.** A preview goes out only when at least one row
+  is actually bookable; a month with nothing to book stays silent. The single exception is a
+  failure alert — so silence always means *healthy*, never *broken*.
+- **The mailbox is the state store.** Every step stays idempotent by looking for its own past
+  email — a preview, a receipt, a reminder — so reruns never double-send or double-book, and the
+  design holds up even when past mail is archived or deleted.
+- **The ledger moves only on an explicit reply.** Parsing the `confirm` reply is the one
+  automated path to a write, and it's guarded by committed regression tests that run in CI
+  *before* any booking step — a blank reply can never read as consent.
+
 ## Design decisions that make the books *correct*
 
 - **Source-of-truth per property, not one-size-fits-all.** A self-managed unit is booked from
@@ -100,6 +128,12 @@ Google Drive "inbox" folder as the drop point for exports (`google-api-python-cl
 `PyMuPDF` / `pypdf` for statement parsing. No database, no migration off the tool the human
 already trusts — the automation meets the existing workflow where it is.
 
+Day to day it runs unattended on GitHub Actions — a poll every few hours, most runs cheap
+no-ops. The pipeline code lives in this public repo; a separate **private** repo holds the
+scheduled workflows and the secrets (mail credentials, the service-account key) and clones this
+one at run time. So the automation's credentials never sit alongside the published code, and the
+code has exactly one home.
+
 All property-identifying data (sheet names, account numbers, lenders, PM details) is isolated
 in a gitignored `config.py`; the committed code carries none of it. Copy the template to start:
 
@@ -116,12 +150,18 @@ python3 promote.py --write          # book it (after review)
 ## Repo layout
 
 ```
-capture.py         # manual / free-text capture → ledger
-import_relay.py    # bank CSV + statement inbox → staging
-mortgage.py        # mortgage-statement PDF parser (interest/escrow split)
-appfolio.py        # property-manager statement PDF parser
-promote.py         # staged rows → month registers (human-confirmed)
-inbox_status.py    # monthly read-only status snapshot
-config.example.py  # config template (real config.py is gitignored)
-private/           # gitignored: credentials, real config, source data
+capture.py             # manual / free-text capture → ledger
+import_relay.py        # bank CSV + statement inbox → staging
+mortgage.py            # mortgage-statement PDF parser (interest/escrow split)
+appfolio.py            # property-manager statement PDF parser
+promote.py             # staged rows → month registers (human-confirmed)
+inbox_status.py        # monthly read-only status snapshot
+preview_email.py       # stages + emails the numbered preview (only when something's bookable)
+confirm_and_book.py    # parses the 'confirm' reply and books — the only automated write path
+email_docs.py          # second input path: documents attached to an email reply
+mailbox_state.py       # durable "already handled?" lookups (survive archive + delete)
+test_confirm_parser.py # CI guard on the confirm gate
+test_mailbox_state.py  # CI guard on mailbox folder discovery
+config.example.py      # config template (real config.py is gitignored)
+private/               # gitignored: credentials, real config, source data
 ```
