@@ -24,7 +24,9 @@ Income:
     python3 capture.py --property cabin --amount 417.81 --payee "STR PAYOUT" --income
 """
 import argparse
+import functools
 import sys
+import time
 import warnings
 from datetime import date as _date, datetime
 
@@ -40,6 +42,67 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+# ---- Sheets rate-limit resilience ----------------------------------------------------------
+# Sheets allows 60 read requests/minute/user. A full monthly close blows past that inside one
+# minute: import_relay classifies every staged row against every month tab in three sheets, and
+# preview_email then re-opens all three from scratch. The 2026-08-01 poll (ops run 30707153877)
+# died on a 429 *after* staging had already succeeded — books fine, no email.
+#
+# A 429 means the request was REJECTED, never executed, so retrying is safe for writes as well
+# as reads: there is no half-applied batch_update to double-apply. (Only 429 is retried; every
+# other APIError still raises, because a failed write for any other reason must stay loud.)
+#
+# The quota bucket refills per MINUTE, so the waits are tens of seconds — a millisecond backoff
+# would just burn the retries. Worst case one request costs ~155s before giving up.
+RATE_LIMIT_WAITS = (20, 45, 90)
+
+
+def _is_rate_limit(err):
+    if getattr(err, "code", None) == 429:
+        return True
+    return getattr(getattr(err, "response", None), "status_code", None) == 429
+
+
+def _install_sheets_retry():
+    """Wrap gspread's single HTTP funnel so every call site retries a 429.
+
+    Patching one method beats sprinkling retries through import_relay/promote/preview_email —
+    those call get_all_values, batch_update and worksheet() in a dozen places, and a retry that
+    covers only open_sheet would still die on the first bulk read after a successful open.
+
+    Degrades to a warning, never an ImportError: requirements.txt pins gspread>=6.0 unpinned at
+    the top, so a future release could move this class. Losing the retry brings back the old
+    behavior; failing to import would take the whole pipeline down.
+    """
+    try:
+        from gspread.http_client import HTTPClient
+    except Exception as e:                                   # pragma: no cover - version drift
+        print(f"  ! Sheets 429 retry not installed ({e}) — rate limits will fail the run.")
+        return
+    if getattr(HTTPClient.request, "_retries_429", False):
+        return                                               # idempotent: modules import freely
+
+    original = HTTPClient.request
+
+    @functools.wraps(original)
+    def request(self, *args, **kwargs):
+        for attempt, wait in enumerate(RATE_LIMIT_WAITS, 1):
+            try:
+                return original(self, *args, **kwargs)
+            except gspread.exceptions.APIError as e:
+                if not _is_rate_limit(e):
+                    raise
+                print(f"  … Sheets rate limit — retry {attempt}/{len(RATE_LIMIT_WAITS)} "
+                      f"in {wait}s", flush=True)
+                time.sleep(wait)
+        return original(self, *args, **kwargs)               # last try: let a 429 surface
+
+    request._retries_429 = True
+    HTTPClient.request = request
+
+
+_install_sheets_retry()
 
 # ---- Property -> Google Sheet (from config.py) ----
 PROPERTY_SHEETS = config.PROPERTY_SHEETS
