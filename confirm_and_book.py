@@ -38,6 +38,7 @@ import ssl
 import subprocess
 import sys
 import warnings
+from email.header import decode_header, make_header
 from email.message import EmailMessage
 
 warnings.filterwarnings("ignore")
@@ -66,6 +67,29 @@ def q(s):
     """Quote an IMAP search term. Required for anything with a space or '@' — an unquoted
     multi-word term is parsed as separate tokens and the server answers BAD."""
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def header_text(msg, name):
+    """-> a header decoded the way a human reads it, not the way it arrived on the wire.
+
+    `message_from_bytes` parses with the compat32 policy, which hands back headers verbatim.
+    One non-ASCII character anywhere makes the sender RFC 2047-encode the line, and clients
+    disagree about how much of it to encode: Python encodes just the offending word, other
+    composers encode the whole line as a single blob. The preview subject carries an em dash
+    ("Bookkeeping preview — N to book [hash]"), so encoding is the NORMAL case here.
+
+    Undecoded, the whole-line shape becomes
+        =?utf-8?q?Re=3A_Bookkeeping_preview_..._=5B280faa2e21=5D?=
+    which has no leading "Re:" and no bracketed hash — so a perfectly good confirm gets
+    dropped by the subject gates before intent() is ever consulted, silently.
+    """
+    raw = msg.get(name)
+    if raw is None:
+        return ""
+    try:
+        return str(make_header(decode_header(str(raw))))
+    except Exception:
+        return str(raw)          # undecodable: fall back to the literal header, never crash
 
 
 def imap_connect():
@@ -128,7 +152,8 @@ def subjects_matching(m, needle):
     """
     out = set()
     for raw in mailbox_state.fetch(m, ("SUBJECT", q(needle)), "(BODY[HEADER.FIELDS (SUBJECT)])"):
-        found = HASH_RE.search(raw.decode("utf-8", "replace"))
+        head = emaillib.message_from_bytes(raw if isinstance(raw, bytes) else bytes(raw))
+        found = HASH_RE.search(header_text(head, "Subject"))
         if found:
             out.add(found.group(1))
     return out
@@ -154,25 +179,41 @@ def pending_confirmations(m):
     handled, found = handled_hashes(m), []
     typ, data = m.search(None, "FROM", q(USER), "SUBJECT", q(PREVIEW_SUBJECT))
     if typ != "OK" or not data or not data[0]:
+        print("  scan: no messages matched the preview subject in INBOX.")
         return []
+    # Why count: every `continue` below is a silent drop, and the caller's only output was
+    # "No new 'confirm' replies" — which reads identically whether there were no replies or
+    # four were found and thrown away. That ambiguity cost a two-day-late close on 2026-08-02.
+    seen = {"unfetchable": 0, "not a reply": 0, "not from owner": 0, "no hash": 0,
+            "already handled": 0, "no confirm word": 0}
     for num in data[0].split():
         typ, raw = m.fetch(num, "(RFC822)")
         if typ != "OK" or not raw or not raw[0]:
+            seen["unfetchable"] += 1
             continue
         msg = emaillib.message_from_bytes(raw[0][1])
-        subject = str(msg.get("Subject", ""))
+        subject = header_text(msg, "Subject")         # decoded — see header_text()
         if not subject.lower().lstrip().startswith("re:"):
-            continue                                  # the original preview, not a reply
-        if USER.lower() not in str(msg.get("From", "")).lower():
-            continue                                  # only act on mail from the owner
+            seen["not a reply"] += 1                  # the original preview, not a reply
+            continue
+        if USER.lower() not in header_text(msg, "From").lower():
+            seen["not from owner"] += 1               # only act on mail from the owner
+            continue
         h = HASH_RE.search(subject)
         if not h:
+            seen["no hash"] += 1
             continue
         h = h.group(1)
         if h in handled or h in found:
+            seen["already handled"] += 1
             continue
-        if intent(plain_body(msg)) == "confirm":
-            found.append(h)
+        if intent(plain_body(msg)) != "confirm":
+            seen["no confirm word"] += 1
+            continue
+        found.append(h)
+    dropped = ", ".join(f"{n} {why}" for why, n in seen.items() if n)
+    print(f"  scan: {len(data[0].split())} message(s) on preview threads; "
+          f"{len(found)} confirmed{f'; skipped {dropped}' if dropped else ''}.")
     return found
 
 
