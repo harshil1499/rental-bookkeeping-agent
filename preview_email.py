@@ -30,6 +30,7 @@ import smtplib
 import ssl
 import subprocess
 import sys
+import textwrap
 import warnings
 from email.message import EmailMessage
 
@@ -53,15 +54,22 @@ SHEETS = config.SHEETS
 HERE = os.path.dirname(os.path.abspath(__file__)) or "."
 ACTION_BOOK = ("income", "accumulate", "variable")
 
+# Only what confirm_and_book actually parses. This list used to advertise an edit syntax
+# ("confirm except 3 -> Repairs", "skip 7", "<n> = <amount>") that was never implemented — and
+# because intent() matches `confirm` anywhere in the head, "confirm except skip 24" booked the
+# whole batch and dropped the edit without a word. The email was teaching a syntax that
+# mis-books. Anything added back here must be parsed on the other side FIRST.
 LEGEND = [
     ("confirm", "book everything shown below"),
-    ("confirm except <edits>", 'e.g. "confirm except 3 -> Repairs, skip 7"'),
-    ("<n> -> <Category>", "recategorize row n"),
-    ("<n> -> income", "book row n as income (e.g. a forfeited deposit)"),
-    ("skip <n>", "drop row n from this batch"),
-    ("<n> = <amount>", "fix row n's amount"),
     ("hold", "do nothing; keep this open"),
 ]
+
+# Shown under the legend, because "confirm books everything" is only safe advice if the way to
+# change something is equally visible. Editing the Import tab is the supported escape hatch:
+# confirm_and_book runs promote only, never import, so hand edits survive to the booking.
+EDIT_HINT = ("To change something first — recategorize, fix an amount, drop a row — edit the "
+             "Import tab in the sheet, then reply confirm. Nothing re-imports in between, so "
+             "your edits are what book.")
 
 
 # ---------------- Idempotency (mailbox as state) ----------------
@@ -245,7 +253,9 @@ def render_text(properties, n_book, h, needs, url):
         L.append("")
     L.append("Reply to book:")
     for cmd, desc in LEGEND:
-        L.append(f"  {cmd:<24} {desc}")
+        L.append(f"  {cmd:<10} {desc}")
+    L.append("")
+    L.append(textwrap.fill(EDIT_HINT, 88, initial_indent="  ", subsequent_indent="  "))
     L.append("")
     L.append(f"(ref {h})")
     return "\n".join(L)
@@ -337,6 +347,7 @@ def render_html(properties, n_book, h, needs, url):
         f'<h3 style="font-size:14px;font-weight:600;margin:28px 0 8px;'
         f'border-top:1px solid {LINE};padding-top:16px">Reply to book</h3>'
         f'{legend_table()}'
+        f'<p style="margin:12px 0 0;font-size:13px;color:{MUTED}">{esc(EDIT_HINT)}</p>'
         f'<p style="margin:18px 0 0;font-size:11.5px;color:{FAINT}">ref {esc(h)}</p>'
         f'</div>')
 

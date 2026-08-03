@@ -52,6 +52,19 @@ def quoted(body, marker=True):
 
 CASES = [
     # (name, reply body, expected intent)
+    # --- Unsupported edit syntax must NOT book. The preview advertised these commands for
+    # weeks without anything parsing them, and `confirm` matching anywhere in the head meant
+    # "confirm except skip 24" booked all 31 rows and dropped the edit silently. The legend no
+    # longer offers them; these guard the reply typed from memory. Expected 'edit' = book
+    # nothing, leave the preview open.
+    ("confirm except, with skip",  "confirm except skip 24", "edit"),
+    ("confirm except, recategorize", "confirm except 3 -> Repairs", "edit"),
+    ("confirm except, unicode arrow", "confirm except 3 → Repairs", "edit"),
+    ("confirm then amount edit",   "confirm, 4 = 120.50", "edit"),
+    ("confirm plus skip on line 2", "confirm\nskip 7", "edit"),
+    # ...while ordinary human confirms keep working. These must never read as edits.
+    ("confirm with thanks",        "confirm, thanks", "confirm"),
+    ("confirm all 31",             "confirm all 31 rows", "confirm"),
     ("bare confirm",              "confirm", "confirm"),
     ("capitalized",               "Confirm", "confirm"),
     ("with punctuation",          "confirm!", "confirm"),

@@ -122,6 +122,15 @@ def plain_body(msg):
         return ""
 
 
+# Edit syntax that is NOT implemented: "confirm except 3 -> Repairs", "skip 7", "4 = 120.50".
+# The preview used to advertise these, and `confirm` matching anywhere in the head meant such a
+# reply booked the ENTIRE batch and discarded the edit silently. The legend no longer offers
+# them, but a reply typed from memory must not book the wrong thing — so a confirm carrying edit
+# syntax books NOTHING and leaves the preview open. Fails closed, which is the only acceptable
+# direction for the one path that writes dollars.
+EDIT_SYNTAX_RE = re.compile(r"\bexcept\b|\bskip\s+\d|\d\s*(->|→|=)\s*\S")
+
+
 def intent(body):
     """Read only the lines ABOVE the quoted original. The preview email itself contains the word
     'confirm' in its legend, so scanning the whole body would make every reply self-trigger."""
@@ -137,6 +146,8 @@ def intent(body):
             break
     text = " ".join(head).lower()
     if re.search(r"\bconfirm\b", text):
+        if EDIT_SYNTAX_RE.search(text):
+            return "edit"          # asked for something we cannot do — book nothing
         return "confirm"
     if re.search(r"\bhold\b", text):
         return "hold"
@@ -185,7 +196,8 @@ def pending_confirmations(m):
     # "No new 'confirm' replies" — which reads identically whether there were no replies or
     # four were found and thrown away. That ambiguity cost a two-day-late close on 2026-08-02.
     seen = {"unfetchable": 0, "not a reply": 0, "not from owner": 0, "no hash": 0,
-            "already handled": 0, "no confirm word": 0}
+            "already handled": 0, "no confirm word": 0,
+            "used unsupported edit syntax — nothing booked": 0}
     for num in data[0].split():
         typ, raw = m.fetch(num, "(RFC822)")
         if typ != "OK" or not raw or not raw[0]:
@@ -207,7 +219,11 @@ def pending_confirmations(m):
         if h in handled or h in found:
             seen["already handled"] += 1
             continue
-        if intent(plain_body(msg)) != "confirm":
+        what = intent(plain_body(msg))
+        if what == "edit":
+            seen["used unsupported edit syntax — nothing booked"] += 1
+            continue
+        if what != "confirm":
             seen["no confirm word"] += 1
             continue
         found.append(h)
