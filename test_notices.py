@@ -85,7 +85,8 @@ class FakeIMAP:
         return "OK", [(b"x", self.view[int(num) - 1].as_bytes())]
 
 
-def mail(subject, body="", *, sender=OWNER, when=NOW, html=None, files=False, mid=None):
+def mail(subject, body="", *, sender=OWNER, when=NOW, html=None, files=False, mid=None,
+         csv_body=b"date,amount\n"):
     m = EmailMessage()
     m["From"], m["To"], m["Subject"] = sender, OWNER, subject
     m["Date"] = format_datetime(when)
@@ -96,7 +97,7 @@ def mail(subject, body="", *, sender=OWNER, when=NOW, html=None, files=False, mi
     else:
         m.set_content(body)
     if files:
-        m.add_attachment(b"date,amount\n", maintype="text", subtype="csv",
+        m.add_attachment(csv_body, maintype="text", subtype="csv",
                          filename="Relay 2026-09-01 #6692.csv")
     return m
 
@@ -267,7 +268,7 @@ else:
         fake.login = fake.logout = lambda *a: ("OK", [b""])
         email_docs.USER, email_docs.PW, email_docs._CACHE = OWNER, "x", None
         email_docs.imaplib.IMAP4_SSL = lambda *_a, **_k: fake
-        return quiet(email_docs.names)
+        return sorted(s["name"] for s in quiet(email_docs.fetch))
     real_ssl = email_docs.imaplib.IMAP4_SSL
     try:
         check("files on a reply to a notice are picked up",
@@ -277,6 +278,10 @@ else:
               docs([(ALL, mail("Re: " + sub, "here", files=True))]) == ["Relay 2026-09-01 #6692.csv"])
         check("files on a notice reply from someone else are ignored",
               docs([(ALL, mail("Re: " + sub, "here", files=True, sender="x@y.com"))]) == [])
+        two = docs([(ALL, mail("Re: " + sub, "v1", files=True)),
+                    (ALL, mail("Re: " + PREVIEW, "v2", files=True, csv_body=b"date,amount\n9/1,5\n"))])
+        check("two same-name attachments with different content -> both kept",
+              two == ["Relay 2026-09-01 #6692.csv"] * 2, repr(two))
         check("files on a preview reply still picked up (no regression)",
               docs([(ALL, mail("Re: " + PREVIEW, "here", files=True))]) == ["Relay 2026-09-01 #6692.csv"])
     finally:

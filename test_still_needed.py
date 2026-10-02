@@ -87,6 +87,13 @@ check("AppFolio txn the day after does",
 check("no AppFolio file at all -> every month, no date tail",
       need(af(None), date(2026, 10, 2), through=(2026, 8))["3135 E Minnesota"]
       == ["AppFolio export covering all of July, August"])
+got = need({**REAL, INDY: {**REAL[INDY], "appfolio_unreconciled_through": date(2026, 10, 3)}},
+           date(2026, 10, 15))
+check("a newer export that doesn't reconcile is named, with what to do",
+      got["3135 E Minnesota"] == ["AppFolio export covering all of August, September (the newest "
+                                  "one, through Oct 3, doesn't add up to its own totals, usually a "
+                                  "cut-off print; re-export with every row shown)"],
+      repr(got["3135 E Minnesota"]))
 got = need({}, date(2026, 9, 3))
 check("nothing arrived -> every doc for every property",
       got == {"Sailing Skies": ["Relay CSV for July, August", "Mortgage statements for July, August"],

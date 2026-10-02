@@ -13,7 +13,7 @@ cannot create a file in the inbox folder, and Shared Drives need Google Workspac
 stores the attachments durably, so the mailbox itself is the store.
 
 Consequence, by design: an emailed file stays in the dataset permanently — there is no "move to
-Done" for it. Harmless, because sources are deduped by filename and promote is idempotent
+Done" for it. Harmless, because sources.py decides which copies count and promote is idempotent
 (preserved promoted stamps + amount reconciliation), exactly like held statements that sit in the
 Drive inbox waiting for their CSV.
 
@@ -24,6 +24,7 @@ Auth: Gmail app password in GMAIL_USER / GMAIL_APP_PASSWORD. If those aren't set
 this yields nothing and the Drive path works exactly as before.
 """
 import email as emaillib
+import hashlib
 import imaplib
 import os
 import warnings
@@ -115,9 +116,12 @@ def fetch():
                 msg = emaillib.message_from_bytes(raw)
                 if USER.lower() not in str(msg.get("From", "")).lower():
                     continue  # only the owner's own mail
+                # Keyed by name AND content: AppFolio exports always share one default name,
+                # so keying on name alone kept the first (oldest) and dropped every newer one.
                 for name, kind, text in _attachments(msg):
-                    found.setdefault(name, {"name": name, "kind": kind, "text": text,
-                                            "file_id": None, "movable": False})
+                    key = (name, hashlib.sha1(text.encode()).hexdigest())
+                    found.setdefault(key, {"name": name, "kind": kind, "text": text,
+                                           "file_id": None, "movable": False})
     except Exception as e:
         print(f"  ! Couldn't read emailed attachments ({str(e)[:120]}) — "
               f"continuing with the Drive inbox only.")
@@ -136,6 +140,3 @@ def fetch():
     return _CACHE
 
 
-def names():
-    """Just the filenames — used where only 'what has arrived' matters."""
-    return sorted(s["name"] for s in fetch())

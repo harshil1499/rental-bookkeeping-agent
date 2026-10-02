@@ -38,6 +38,7 @@ warnings.filterwarnings("ignore")
 
 import config
 import email_docs
+import sources
 import still_needed
 import mailbox_state
 from promote import read_import, resolve
@@ -75,10 +76,12 @@ EDIT_HINT = ("To change something first — recategorize, fix an amount, drop a 
 # ---------------- Idempotency (mailbox as state) ----------------
 
 def inbox_fileset(svc, cfg):
-    """Everything that has arrived by either path — a newly emailed document changes the
-    hash exactly like a newly uploaded one, so it triggers a fresh preview."""
-    names = {f["name"] for f in list_inbox_files(svc, cfg["inbox_folder_id"])}
-    return sorted(names | set(email_docs.names()))
+    """Everything that has arrived by either path, identified by CONTENT (sources.fileset). A
+    newly emailed document changes the hash exactly like a newly uploaded one, and so does a
+    same-name replacement — AppFolio exports always share one name, and a name-only set never
+    noticed a new one."""
+    return sources.fileset(sources.merge(list_inbox_files(svc, cfg["inbox_folder_id"]), [],
+                                         email_docs.fetch()))
 
 
 def inbox_url(cfg):

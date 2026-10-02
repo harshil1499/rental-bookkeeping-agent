@@ -97,7 +97,14 @@ def missing(by_prop, months, *, labels, appfolio_sheet, today):
             through = b.get("appfolio_through")
             af = [ym for ym in months if not (through and (through.year, through.month) > ym)]
             if af:
-                tail = f" (the latest one ends {through:%b} {through.day})" if through else ""
+                bad = b.get("appfolio_unreconciled_through")
+                if bad:   # a newer export exists but doesn't count — say why, or it reads as ignored
+                    tail = (f" (the newest one, through {bad:%b} {bad.day}, doesn't add up to its "
+                            f"own totals, usually a cut-off print; re-export with every row shown)")
+                elif through:
+                    tail = f" (the latest one ends {through:%b} {through.day})"
+                else:
+                    tail = ""
                 items.append(f"AppFolio export covering all of {names(af)}{tail}")
         if items:
             out.append((label, items))

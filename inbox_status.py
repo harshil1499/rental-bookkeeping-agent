@@ -15,6 +15,7 @@ import mortgage
 import appfolio
 import config
 import email_docs
+import sources
 from import_relay import (drive_service, load_drive_config, list_inbox_files,
                           download_pdf_text, account_of, ACCOUNT_SHEETS)
 
@@ -34,24 +35,24 @@ def scan(svc=None, cfg=None, include_done=False):
 
     include_done: also read Drive's Done/ folder. "What has arrived, ever" must count processed
     files, or every month that a --write run filed away would read as missing.
+
+    AppFolio coverage comes from the export import_relay would stage (appfolio.pick_best), so
+    "still needed" and the Import tab agree. `appfolio_through` is that export's latest date;
+    `appfolio_unreconciled_through` is set when a NEWER export exists but fails reconcile
+    (usually a truncated print), so the nudge can say why it doesn't count.
     """
     cfg = cfg or load_drive_config()
     svc = svc or drive_service()
-    # Both input paths count as "arrived": files in the Drive inbox, and documents attached to
-    # an email reply. Drive wins a filename collision; the inbox wins over Done.
-    drive = list_inbox_files(svc, cfg["inbox_folder_id"])
-    if include_done and cfg.get("done_folder_id"):
-        drive += list_inbox_files(svc, cfg["done_folder_id"])
-    files, have = [], set()
-    for f in drive:
-        if f["name"] not in have:
-            have.add(f["name"])
-            files.append({"name": f["name"], "kind": f["kind"], "id": f["id"], "text": None})
-    files += [{"name": s["name"], "kind": s["kind"], "id": None, "text": s["text"]}
-              for s in email_docs.fetch() if s["name"] not in have]
+    done = (list_inbox_files(svc, cfg["done_folder_id"])
+            if include_done and cfg.get("done_folder_id") else [])
+    files = [{"name": d["name"], "kind": d["kind"], "id": d["file_id"], "text": d["text"]}
+             for d in sources.merge(list_inbox_files(svc, cfg["inbox_folder_id"]), done,
+                                    email_docs.fetch())]
 
     by_prop = {p: {"csv_months": set(), "statements": [], "appfolio": False,
-                   "csv_ym": set(), "stmt_ym": set(), "appfolio_through": None} for p in PROPS}
+                   "csv_ym": set(), "stmt_ym": set(), "appfolio_through": None,
+                   "appfolio_unreconciled_through": None} for p in PROPS}
+    exports = {}   # sheet -> [(name, parsed)]
     csv_months = {}   # sheet -> set of month names present as a Relay CSV
     unknown = []
 
@@ -79,13 +80,21 @@ def scan(svc=None, cfg=None, include_done=False):
             continue
         af = appfolio.parse_appfolio_pdf(text)
         if af:
-            b = by_prop[af["sheet"]]
-            b["appfolio"] = True
-            latest = max((r["date_obj"].date() for r in af["rows"]), default=None)
-            if latest and (b["appfolio_through"] is None or latest > b["appfolio_through"]):
-                b["appfolio_through"] = latest
+            by_prop[af["sheet"]]["appfolio"] = True
+            exports.setdefault(af["sheet"], []).append((f["name"], af))
             continue
         unknown.append(f["name"])
+
+    for sheet, cands in exports.items():
+        (_name, best), rest = appfolio.pick_best(cands)
+        b = by_prop[sheet]
+        if appfolio.reconcile(best)[0]:
+            b["appfolio_through"] = appfolio.latest(best)
+        newer_bad = [appfolio.latest(p) for _n, p in [(_name, best)] + rest
+                     if not appfolio.reconcile(p)[0]
+                     and (b["appfolio_through"] is None or appfolio.latest(p) > b["appfolio_through"])]
+        if newer_bad:
+            b["appfolio_unreconciled_through"] = max(newer_bad)
 
     return {"by_prop": by_prop, "csv_months": csv_months,
             "unknown": unknown, "n_files": len(files)}

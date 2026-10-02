@@ -42,6 +42,7 @@ import mortgage
 import appfolio
 import config
 import email_docs
+import sources
 from capture import open_sheet, suggest_category, parse_money  # shared normalized path
 
 CREDS_FILE = config.CREDS_FILE
@@ -103,7 +104,8 @@ def load_drive_config():
 def list_inbox_files(svc, inbox_id):
     """Non-folder files in the inbox, tagged 'csv' or 'pdf' (others ignored)."""
     q = f"'{inbox_id}' in parents and trashed = false and mimeType != '{FOLDER_MIME}'"
-    res = svc.files().list(q=q, fields="files(id, name, mimeType)", spaces="drive").execute()
+    res = svc.files().list(q=q, fields="files(id, name, mimeType, modifiedTime)",
+                           spaces="drive").execute()
     out = []
     for f in res.get("files", []):
         name = f["name"].lower()
@@ -350,37 +352,30 @@ def gather_sources(args):
                 with open(p, "rb") as f:
                     doc = fitz.open(stream=f.read(), filetype="pdf")
                 text = "\n".join(page.get_text() for page in doc)
-                srcs.append({"name": os.path.basename(p), "kind": "pdf",
+                srcs.append({"name": os.path.basename(p), "kind": "pdf", "origin": "local",
                              "text": text, "file_id": None, "movable": False})
             else:
                 with open(p, encoding="utf-8-sig") as f:
-                    srcs.append({"name": os.path.basename(p), "kind": "csv",
+                    srcs.append({"name": os.path.basename(p), "kind": "csv", "origin": "local",
                                  "text": f.read(), "file_id": None, "movable": False})
         return srcs, None, None
 
-    # The Import view is built from the full known dataset (inbox + Done); only inbox files
-    # are movable. Dedupe by filename — inbox copy wins over an already-filed Done copy.
+    # The Import view is built from the full known dataset (inbox + Done + emailed); only inbox
+    # files are movable. Which copies count is sources.merge's call — see that module for why
+    # CSVs dedupe by name but PDFs never do.
     cfg = load_drive_config()
     svc = drive_service()
-    picked = {}  # name -> (meta, movable)
-    for m in list_inbox_files(svc, cfg["done_folder_id"]):
-        picked[m["name"]] = (m, False)
-    for m in list_inbox_files(svc, cfg["inbox_folder_id"]):
-        picked[m["name"]] = (m, True)
-    # Second input path: documents attached to an email reply (see email_docs). Not an error
-    # for the Drive inbox to be empty if the month's files were emailed in instead.
-    emailed = email_docs.fetch()
-    if not picked and not emailed:
+    docs = sources.merge(list_inbox_files(svc, cfg["inbox_folder_id"]),
+                         list_inbox_files(svc, cfg["done_folder_id"]),
+                         email_docs.fetch())
+    if not docs:
         sys.exit("Drive inbox is empty — drop Relay CSVs / mortgage PDFs into 'Relay Imports', "
                  "or reply to the reminder with them attached.")
-    srcs = []
-    for name, (m, movable) in picked.items():
-        text = download_pdf_text(svc, m["id"]) if m["kind"] == "pdf" else download_csv_text(svc, m)
-        srcs.append({"name": name, "kind": m["kind"], "text": text,
-                     "file_id": m["id"], "movable": movable})
-    # Drive wins a filename collision — putting a file in the inbox is the more deliberate act.
-    srcs.extend(s for s in emailed if s["name"] not in picked)
-    return srcs, svc, cfg
+    for d in docs:
+        if d["text"] is None:
+            d["text"] = (download_pdf_text(svc, d["file_id"]) if d["kind"] == "pdf"
+                         else download_csv_text(svc, d["meta"]))
+    return docs, svc, cfg
 
 
 def main():
@@ -425,17 +420,15 @@ def main():
     # Pass 2 — statement PDFs. Try the mortgage parser first; if it isn't a mortgage statement,
     # try the AppFolio owner-statement parser (Indy LTR). AppFolio rows stage directly — they
     # carry their own income/expense detail and don't gate on a Relay draft the way mortgages do.
+    # Exports are collected first and ONE per property is staged (appfolio.pick_best): each is a
+    # running YTD ledger, so staging two would put their overlapping rows on the tab twice.
+    exports = {}   # sheet -> [(source, parsed)]
     for s in (x for x in sources if x["kind"] == "pdf"):
         parsed = mortgage.parse_mortgage_pdf(s["text"])
         if not parsed:
             af = appfolio.parse_appfolio_pdf(s["text"])
             if af:
-                ok, msg = appfolio.reconcile(af)
-                g, sheet = group_for(af["sheet"], af["label"])
-                g["rows"].extend(finalize(af["sheet"], af["label"], sheet,
-                                          appfolio.entries_from(af), recon_cache)["rows"])
-                flag = "" if ok else "  ⚠ CHECK"
-                print(f"  · AppFolio '{s['name']}' → {af['label']}: {msg}{flag}")
+                exports.setdefault(af["sheet"], []).append((s, af))
                 if s["movable"]:
                     processed.append((s["name"], s["file_id"]))
             else:
@@ -453,6 +446,20 @@ def main():
                                       mortgage.entries_from(parsed), recon_cache)["rows"])
         if s["movable"]:
             processed.append((s["name"], s["file_id"]))
+
+    for cands in exports.values():
+        (best_src, af), rest = appfolio.pick_best(cands)
+        ok, msg = appfolio.reconcile(af)
+        g, sheet = group_for(af["sheet"], af["label"])
+        g["rows"].extend(finalize(af["sheet"], af["label"], sheet,
+                                  appfolio.entries_from(af), recon_cache)["rows"])
+        flag = "" if ok else "  ⚠ CHECK"
+        print(f"  · AppFolio '{best_src['name']}' ({best_src['origin']}, through "
+              f"{appfolio.latest(af):%-m/%-d}) → {af['label']}: {msg}{flag}")
+        for src, other in rest:
+            ook, _m = appfolio.reconcile(other)
+            print(f"    not used: '{src['name']}' ({src['origin']}, through "
+                  f"{appfolio.latest(other):%-m/%-d}{'' if ook else ', does NOT reconcile'})")
 
     if not groups:
         sys.exit("Nothing to process.")

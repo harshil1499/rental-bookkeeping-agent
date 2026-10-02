@@ -162,6 +162,23 @@ def parse_appfolio_pdf(text):
     return {"sheet": sheet, "label": label, "rows": rows, "summary": _find_summary(flat)}
 
 
+def latest(parsed):
+    """-> date of the export's latest transaction."""
+    return max(r["date_obj"] for r in parsed["rows"]).date()
+
+
+def pick_best(candidates):
+    """[(name, parsed)] for ONE property -> (best, [the rest]).
+
+    Exports are running year-to-date ledgers, so exactly one is staged; two would stage their
+    overlapping rows twice. Best = reconciles, then latest transaction, then most rows. A newer
+    export that fails reconcile is usually a truncated print-to-PDF (the 8/10 export covered only
+    7/30-8/10), so it must not displace an older complete one."""
+    ranked = sorted(candidates, key=lambda c: (reconcile(c[1])[0], latest(c[1]), len(c[1]["rows"])),
+                    reverse=True)
+    return ranked[0], ranked[1:]
+
+
 def entries_from(parsed):
     """Booking rows for import_relay (strip internal keys)."""
     keep = ("date_obj", "date_str", "payee", "amount", "type", "category", "source", "status", "note")
