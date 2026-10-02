@@ -24,24 +24,34 @@ MONTHS = ["January", "February", "March", "April", "May", "June", "July", "Augus
           "September", "October", "November", "December"]
 
 
-def scan(svc=None, cfg=None):
+def scan(svc=None, cfg=None, include_done=False):
     """Read-only bucketing of the Drive inbox by property.
 
-    Shared by this CLI snapshot and preview_email.py so both describe "what's still needed"
-    from the same logic. Returns {by_prop, csv_months, unknown, n_files}, where a statement is
-    'held' when its month has no matching Relay CSV on hand.
+    Returns {by_prop, csv_months, unknown, n_files}, where a statement is 'held' when its month
+    has no matching Relay CSV on hand. Each property also carries year-month coverage for
+    still_needed.py: `csv_ym` and `stmt_ym` ({(year, month)}) and `appfolio_through` (date of the
+    latest AppFolio transaction seen, or None).
+
+    include_done: also read Drive's Done/ folder. "What has arrived, ever" must count processed
+    files, or every month that a --write run filed away would read as missing.
     """
     cfg = cfg or load_drive_config()
     svc = svc or drive_service()
     # Both input paths count as "arrived": files in the Drive inbox, and documents attached to
-    # an email reply. Drive wins a filename collision.
-    files = [{"name": f["name"], "kind": f["kind"], "id": f["id"], "text": None}
-             for f in list_inbox_files(svc, cfg["inbox_folder_id"])]
-    have = {f["name"] for f in files}
+    # an email reply. Drive wins a filename collision; the inbox wins over Done.
+    drive = list_inbox_files(svc, cfg["inbox_folder_id"])
+    if include_done and cfg.get("done_folder_id"):
+        drive += list_inbox_files(svc, cfg["done_folder_id"])
+    files, have = [], set()
+    for f in drive:
+        if f["name"] not in have:
+            have.add(f["name"])
+            files.append({"name": f["name"], "kind": f["kind"], "id": f["id"], "text": None})
     files += [{"name": s["name"], "kind": s["kind"], "id": None, "text": s["text"]}
               for s in email_docs.fetch() if s["name"] not in have]
 
-    by_prop = {p: {"csv_months": set(), "statements": [], "appfolio": False} for p in PROPS}
+    by_prop = {p: {"csv_months": set(), "statements": [], "appfolio": False,
+                   "csv_ym": set(), "stmt_ym": set(), "appfolio_through": None} for p in PROPS}
     csv_months = {}   # sheet -> set of month names present as a Relay CSV
     unknown = []
 
@@ -55,6 +65,8 @@ def scan(svc=None, cfg=None):
                 mon = MONTHS[int(m.group(2)) - 1] if m else None
                 by_prop[sheet]["csv_months"].add(mon or f["name"])
                 csv_months.setdefault(sheet, set()).add(mon)
+                if m:
+                    by_prop[sheet]["csv_ym"].add((int(m.group(1)), int(m.group(2))))
             else:
                 unknown.append(f["name"])
             continue
@@ -63,10 +75,15 @@ def scan(svc=None, cfg=None):
         mp = mortgage.parse_mortgage_pdf(text)
         if mp:
             by_prop[mp["sheet"]]["statements"].append((mp["month"], mp["amount"], f["name"]))
+            by_prop[mp["sheet"]]["stmt_ym"].add((mp["due"].year, mp["due"].month))
             continue
         af = appfolio.parse_appfolio_pdf(text)
         if af:
-            by_prop[af["sheet"]]["appfolio"] = True
+            b = by_prop[af["sheet"]]
+            b["appfolio"] = True
+            latest = max((r["date_obj"].date() for r in af["rows"]), default=None)
+            if latest and (b["appfolio_through"] is None or latest > b["appfolio_through"]):
+                b["appfolio_through"] = latest
             continue
         unknown.append(f["name"])
 

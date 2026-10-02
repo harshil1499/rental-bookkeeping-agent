@@ -38,7 +38,7 @@ warnings.filterwarnings("ignore")
 
 import config
 import email_docs
-import inbox_status
+import still_needed
 import mailbox_state
 from promote import read_import, resolve
 from capture import open_sheet
@@ -158,32 +158,6 @@ def collect_preview():
                 "book": book, "counts": counts,
             })
     return properties, n
-
-
-def collect_needs(scan):
-    """-> [(property label, [things still missing])] from the shared inbox scan, so the email
-    answers 'what do I drop?' and not just 'what would book?'."""
-    out = []
-    by_prop, csv_months = scan["by_prop"], scan["csv_months"]
-    for sheet, label in config.INBOX_PROPS.items():
-        b = by_prop.get(sheet)
-        if not b:
-            continue
-        items = []
-        drafted = csv_months.get(sheet, set())
-        held = {mon for mon, _amt, _name in b["statements"] if mon not in drafted}
-        if held:
-            # chronological, not alphabetical — "July, August", never "August, July"
-            months = sorted(held, key=lambda m: inbox_status.MONTHS.index(m)
-                            if m in inbox_status.MONTHS else 99)
-            plural = "" if len(held) == 1 else "s"
-            items.append(f"Relay CSV for {', '.join(months)} — {len(held)} mortgage "
-                         f"statement{plural} waiting on it")
-        if sheet == config.INBOX_APPFOLIO_SHEET and not b["appfolio"]:
-            items.append("AppFolio owner-statement export")
-        if items:
-            out.append((label, items))
-    return out
 
 
 # ---------------- Render + send ----------------
@@ -394,7 +368,7 @@ def main():
         # anything is bookable — that sends one email, and the hash gate closes for good.
         print(f"Nothing to book for inbox set [{h}] — staged only, no email sent.")
         return
-    needs = collect_needs(inbox_status.scan(svc, cfg))
+    needs, _months = still_needed.collect(svc, cfg)   # one definition across every email
     url = inbox_url(cfg)
     subject = f"Bookkeeping preview — {n_book} to book [{h}]"
     send(subject,

@@ -502,10 +502,26 @@ def promoted_keys():
     return out
 
 
-def render_summary(props, booked, missed, output, ok):
-    """-> (n_booked, text, html) receipt, styled like the preview so it reads the same way."""
+def receipt_needs():
+    """-> (needs, inbox url), or (None, None) if the check fails. The receipt is what marks a
+    batch handled, so nothing about "still needed" may ever stop it from sending."""
+    try:
+        import still_needed
+        from import_relay import drive_service, load_drive_config
+        from preview_email import inbox_url
+        cfg = load_drive_config()
+        needs, _months = still_needed.collect(drive_service(), cfg)
+        return needs, inbox_url(cfg)
+    except Exception as e:
+        print(f"  ! Couldn't check what's still needed ({str(e)[:120]}) — receipt goes without it.")
+        return None, None
+
+
+def render_summary(props, booked, missed, output, ok, needs=None, url=None):
+    """-> (n_booked, text, html) receipt, styled like the preview so it reads the same way.
+    `needs` is still_needed's list ([] = nothing missing, None = the check failed)."""
     from preview_email import (FONT, INK, MUTED, FAINT, LINE, MONO,
-                               amount_of, category_of, esc, rows_table)
+                               amount_of, category_of, esc, needs_block, rows_table)
 
     blocks, lines, n_booked, n_missed = [], [], 0, 0
     for p in props:
@@ -555,6 +571,18 @@ def render_summary(props, booked, missed, output, ok):
         headline += (f' <span style="color:#8a5a1a">{n_missed} row'
                      f'{"" if n_missed == 1 else "s"} did not book — see below.</span>')
 
+    if needs:
+        lines.append("Still needed (these months aren't fully booked until they arrive):")
+        for label, items in needs:
+            lines.append(f"  {label}")
+            lines += [f"    - {t}" for t in items]
+        lines.append("")
+    elif needs is None:
+        lines += ["(Couldn't check what's still needed this time.)", ""]
+    needs_html = needs_block(needs, url) if needs else (
+        f'<p style="margin:16px 0 0;font-size:12.5px;color:{FAINT}">Couldn\'t check what\'s '
+        f'still needed this time.</p>' if needs is None else "")
+
     text = f"{head_text}\n\n" + "\n".join(lines) + f"\n\n--- promote output ---\n{output}\n"
     html = (
         f'<div style="font-family:{FONT};color:{INK};background:#ffffff;font-size:15px;'
@@ -562,7 +590,7 @@ def render_summary(props, booked, missed, output, ok):
         f'<h2 style="font-size:19px;font-weight:600;margin:0 0 6px">'
         f'{"Booked" if ok else "Booking failed"}</h2>'
         f'<p style="margin:0;color:{MUTED};font-size:14px">{headline}</p>'
-        f'{"".join(blocks)}'
+        f'{"".join(blocks)}{needs_html}'
         f'<h3 style="font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;'
         f'color:{MUTED};margin:28px 0 8px;border-top:1px solid {LINE};padding-top:16px">'
         f'Run log</h3>'
@@ -635,8 +663,9 @@ def main(argv):
     code, output = run_promote()
     print(output)
     stamped = promoted_keys() if code == 0 else set()
+    needs, url = receipt_needs()
     n_booked, text, html = render_summary(
-        before, keys & stamped, keys - stamped, output, ok=(code == 0))
+        before, keys & stamped, keys - stamped, output, ok=(code == 0), needs=needs, url=url)
     # promote books every eligible staged row at once, so it runs once regardless of how many
     # previews were confirmed; each hash still gets a summary so each is marked handled.
     for h in pending:
