@@ -141,7 +141,13 @@ def parse_appfolio_pdf(text):
         party = parts[0].strip(" -:") if parts else ""
         desc = " ".join(p.strip() for p in parts[1:]).strip(" -:") if len(parts) > 1 else clean
         cat, btype, note = _classify(txtype, party, desc)
-        signed = -abs(amount) if btype == "Expense" else abs(amount)
+        # Sign follows the money, not the category: a Cash Out leaves the PM reserve even when no
+        # rule recognizes it (a leasing fee, a deposit transfer) and it lands as Review. Keying the
+        # sign on btype made those rows positive and failed reconcile by twice their total, a
+        # false ⚠ CHECK on every run from 8/10 (Δ -4,060.00: $450 leasing fee + $1,580 SD
+        # transfer). Registers store magnitudes and stamps key on abs(amount), so this changes
+        # only the check and the Import tab's display.
+        signed = -abs(amount) if (btype == "Expense" or txtype == "Cash Out") else abs(amount)
         rows.append({
             "date_obj": d, "date_str": d.strftime("%-m/%-d/%Y"),
             "payee": (party or config.APPFOLIO_PM_NAME) + (f" — {desc}" if desc else ""),
