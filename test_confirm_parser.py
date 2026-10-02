@@ -22,12 +22,13 @@ import os
 import sys
 from email import message_from_bytes
 from email.header import Header
+from email.message import EmailMessage
 
 # intent() is pure, but the module reads Gmail creds at import time.
 os.environ.setdefault("GMAIL_USER", "test@example.com")
 os.environ.setdefault("GMAIL_APP_PASSWORD", "unused")
 
-from confirm_and_book import HASH_RE, header_text, intent  # noqa: E402
+from confirm_and_book import HASH_RE, header_text, intent, plain_body  # noqa: E402
 
 # A realistic preview body — note line 2 contains the word "confirm".
 PREVIEW = """Bookkeeping preview - 3 row(s) ready to book.
@@ -120,6 +121,100 @@ SUBJECT_CASES = [
 ]
 
 
+# --- Whole messages: which part of the reply intent() is handed -----------------------------
+# iOS Mail answers an HTML preview with an HTML-ONLY reply (no text/plain part). Reading only
+# text/plain turned a real "Confirm" into an empty body on 2026-10-02 and September sat unbooked.
+# The opposite failure is worse: raw HTML is one long line, so a BLANK single-part HTML reply put
+# the quoted preview's "reply confirm" on line one and booked. Both shapes are tested here.
+PREVIEW_HTML = (
+    '<div style="font-family:-apple-system,sans-serif"><h2>Bookkeeping preview</h2>'
+    '<p><strong>29</strong> rows ready to book — nothing is booked until you reply '
+    '<strong>confirm</strong>.</p><table><tr><td>1</td><td>9/1/2026</td><td>+1224.70</td></tr>'
+    '</table></div>')
+
+
+def apple(typed):
+    """iOS Mail's reply HTML, verbatim structure from the 2026-10-02 reply."""
+    return ('<html class="apple-mail-supports-explicit-dark-mode"><head><meta charset="utf-8">'
+            f'</head><body dir="auto">{typed}<br id="lineBreakAtBeginningOfSignature">'
+            '<div dir="ltr">Sent from my iPhone</div><div dir="ltr"><br><blockquote type="cite">'
+            'On Oct 1, 2026, at 8:36 PM, me@x.com wrote:<br><br></blockquote></div>'
+            f'<blockquote type="cite"><div dir="ltr">﻿{PREVIEW_HTML}</div></blockquote>'
+            '</body></html>')
+
+
+def gmail(typed):
+    return (f'<div dir="ltr">{typed}</div><br><div class="gmail_quote gmail_quote_container">'
+            '<div dir="ltr" class="gmail_attr">On Thu, Oct 1, 2026 at 8:36 PM &lt;me@x.com&gt; '
+            f'wrote:<br></div><blockquote class="gmail_quote">{PREVIEW_HTML}</blockquote></div>')
+
+
+def outlook(typed):
+    return (f'<html><body><div>{typed}</div><div id="appendonsend"></div><hr>'
+            '<div id="divRplyFwdMsg"><b>From:</b> me@x.com<br><b>Subject:</b> Bookkeeping preview'
+            f'</div>{PREVIEW_HTML}</body></html>')
+
+
+def bare(typed):
+    """An unknown client that pastes the original with no quote wrapper at all."""
+    return f'<html><body><div>{typed}</div>{PREVIEW_HTML}</body></html>'
+
+
+def mime(html=None, plain=None, single=False):
+    m = EmailMessage()
+    if single:
+        m.set_content(html, subtype="html")
+        return m
+    m.make_alternative()
+    if plain is not None:
+        m.add_alternative(plain)
+    if html is not None:
+        m.add_alternative(html, subtype="html")
+    return m
+
+
+STYLE_BAIT = '<html><head><style>.confirm{color:red}</style></head><body><br>'
+MIME_CASES = [
+    # (name, message, expected intent)
+    ("iPhone confirm, html-only multipart", mime(apple("Confirm")), "confirm"),
+    ("iPhone confirm, single-part html",    mime(apple("Confirm"), single=True), "confirm"),
+    ("iPhone hold, html-only",              mime(apple("hold")), "hold"),
+    ("iPhone edit syntax, html-only",       mime(apple("confirm except skip 4")), "edit"),
+    ("Gmail confirm, html-only",            mime(gmail("confirm")), "confirm"),
+    ("Outlook confirm, html-only",          mime(outlook("Confirm")), "confirm"),
+    ("plain part wins over html",           mime(gmail("hold"), plain="confirm"), "confirm"),
+    ("empty plain part falls back to html", mime(apple("Confirm"), plain="  \n"), "confirm"),
+    ("confirm with &nbsp;",                 mime(apple("Confirm&nbsp;")), "confirm"),
+    # --- the dangerous ones: nothing typed, the preview (which says "confirm") quoted below ---
+    ("EMPTY iPhone reply, single-part html", mime(apple(""), single=True), None),
+    ("EMPTY iPhone reply, html-only",       mime(apple("")), None),
+    ("EMPTY Gmail reply, html-only",        mime(gmail("<br>")), None),
+    ("EMPTY Outlook reply, html-only",      mime(outlook("<br>")), None),
+    ("EMPTY reply, unwrapped quote",        mime(bare("<br>")), None),
+    ("EMPTY reply, unwrapped, single-part", mime(bare(""), single=True), None),
+    # Reply-with-selection quotes one line and no attribution, so only the structural cutoff
+    # (blockquote / gmail_quote) stands between that line and intent().
+    ("EMPTY reply quoting a selected line",
+     mime('<html><body><br><blockquote type="cite">nothing is booked until you reply confirm'
+          '</blockquote></body></html>'), None),
+    ("EMPTY Gmail reply quoting a selection",
+     mime('<div><br></div><div class="gmail_quote">reply confirm to book</div>'), None),
+    ("'confirm' only in a <style> block",   mime(STYLE_BAIT + "</body></html>"), None),
+    ("no body parts at all",                mime(), None),
+]
+
+
+def check_messages():
+    failures = []
+    for name, msg, expected in MIME_CASES:
+        got = intent(plain_body(msg))
+        ok = got == expected
+        if not ok:
+            failures.append(name)
+        print(f"{'PASS' if ok else 'FAIL'}  {name:<40} -> {got!r} (expected {expected!r})")
+    return failures
+
+
 def check_subjects():
     """Every wire form of the same subject must clear both gates and yield the same hash."""
     failures = []
@@ -152,6 +247,9 @@ def main():
         print(f"{'PASS' if ok else 'FAIL'}  {name:<40} -> {got!r} (expected {expected!r})")
 
     print()
+    failures += check_messages()
+
+    print()
     failures += check_subjects()
 
     print()
@@ -159,7 +257,8 @@ def main():
         print(f"{len(failures)} FAILURE(S): {', '.join(failures)}")
         print("Refusing to treat the confirm gate as trustworthy — fix before booking.")
         return 1
-    print(f"All {len(CASES) + len(SUBJECT_CASES) + 1} cases passed — confirm gate behaves.")
+    total = len(CASES) + len(MIME_CASES) + len(SUBJECT_CASES) + 1
+    print(f"All {total} cases passed — confirm gate behaves.")
     return 0
 
 

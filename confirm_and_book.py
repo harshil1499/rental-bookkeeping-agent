@@ -40,6 +40,7 @@ import sys
 import warnings
 from email.header import decode_header, make_header
 from email.message import EmailMessage
+from html.parser import HTMLParser
 
 warnings.filterwarnings("ignore")
 
@@ -106,20 +107,85 @@ def logout(m):
         pass
 
 
-def plain_body(msg):
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                try:
-                    charset = part.get_content_charset() or "utf-8"
-                    return part.get_payload(decode=True).decode(charset, "replace")
-                except Exception:
-                    continue
-        return ""
+class _ReplyText(HTMLParser):
+    """HTML reply -> the text the sender typed, one line per block, stopping at the quoted original.
+
+    Stopping is a SAFETY control for the same reason as QUOTE_RE: the quoted preview contains the
+    word 'confirm'. Cut at every structural quote marker the common clients emit, and let QUOTE_RE
+    and the six-line limit in intent() catch whatever slips past (e.g. the preview's own
+    "Bookkeeping preview" heading)."""
+    BREAKS = {"br", "p", "div", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6"}
+    HIDDEN = {"head", "style", "script", "title"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.hidden, self.done = [], 0, False
+
+    @staticmethod
+    def _is_quote(tag, attrs):
+        a = dict(attrs)
+        cls, ident = (a.get("class") or ""), (a.get("id") or "")
+        return (tag in ("blockquote", "hr")                     # Apple Mail, Thunderbird, Outlook rule
+                or "gmail_quote" in cls or "yahoo_quoted" in cls
+                or ident in ("divRplyFwdMsg", "appendonsend"))  # Outlook
+
+    def handle_starttag(self, tag, attrs):
+        if self.done:
+            return
+        if self._is_quote(tag, attrs):
+            self.done = True
+            return
+        if tag in self.HIDDEN:
+            self.hidden += 1
+        if tag in self.BREAKS:
+            self.out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.HIDDEN and self.hidden:
+            self.hidden -= 1
+        if tag in self.BREAKS:
+            self.out.append("\n")
+
+    def handle_data(self, data):
+        if not self.done and not self.hidden:
+            self.out.append(data.replace("﻿", "").replace("\xa0", " "))
+
+
+def html_reply_text(html):
+    p = _ReplyText()
     try:
-        return msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", "replace")
+        p.feed(html)
+        p.close()
+    except Exception:
+        return ""          # unparseable: book nothing
+    return "".join(p.out)
+
+
+def _decoded(part):
+    try:
+        return part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", "replace")
     except Exception:
         return ""
+
+
+def plain_body(msg):
+    """-> the reply as plain text, for intent().
+
+    Prefers text/plain. iOS Mail sends replies to an HTML message as HTML ONLY, with no
+    text/plain part; reading only text/plain dropped a real iPhone confirm on 2026-10-02. So fall
+    back to the HTML part, converted to lines and cut at the quoted original. Raw HTML must never
+    reach intent(): it arrives as one long line, so the quoted preview's own "reply confirm" sits
+    on the first line and a BLANK reply would book."""
+    parts = list(msg.walk()) if msg.is_multipart() else [msg]
+    for part in parts:
+        if part.get_content_type() == "text/plain":
+            text = _decoded(part)
+            if text.strip():
+                return text
+    for part in parts:
+        if part.get_content_type() == "text/html":
+            return html_reply_text(_decoded(part))
+    return ""
 
 
 # Edit syntax that is NOT implemented: "confirm except 3 -> Repairs", "skip 7", "4 = 120.50".
