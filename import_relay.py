@@ -454,12 +454,14 @@ def main():
         g["rows"].extend(finalize(af["sheet"], af["label"], sheet,
                                   appfolio.entries_from(af), recon_cache)["rows"])
         flag = "" if ok else "  ⚠ CHECK"
-        print(f"  · AppFolio '{best_src['name']}' ({best_src['origin']}, through "
-              f"{appfolio.latest(af):%-m/%-d}) → {af['label']}: {msg}{flag}")
+        print(f"  · AppFolio '{best_src['name']}' ({best_src['origin']}, {len(af['rows'])} rows, "
+              f"{min(r['date_obj'] for r in af['rows']):%-m/%-d}-{appfolio.latest(af):%-m/%-d})"
+              f" → {af['label']}: {msg}{flag}")
         for src, other in rest:
-            ook, _m = appfolio.reconcile(other)
-            print(f"    not used: '{src['name']}' ({src['origin']}, through "
-                  f"{appfolio.latest(other):%-m/%-d}{'' if ook else ', does NOT reconcile'})")
+            ook, omsg = appfolio.reconcile(other)
+            print(f"    not used: '{src['name']}' ({src['origin']}, {len(other['rows'])} rows, "
+                  f"{min(r['date_obj'] for r in other['rows']):%-m/%-d}-{appfolio.latest(other):%-m/%-d})"
+                  f"{'' if ook else ' — does NOT reconcile: ' + omsg}")
 
     if not groups:
         sys.exit("Nothing to process.")
