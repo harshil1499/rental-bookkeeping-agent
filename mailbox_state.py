@@ -26,7 +26,10 @@ the ledger, and it stays INBOX-only so that deleting a preview withdraws it.
 Stdlib only, on purpose: confirm_and_book.py imports this module, and its parser tests run
 in CI before config.py has been materialized from secrets.
 """
+import imaplib
 import re
+import time
+from email.message import EmailMessage
 
 # `(\HasNoChildren \All) "/" "[Gmail]/All Mail"` — flags, delimiter, then the name, which is
 # quoted whenever it contains a space (i.e. essentially always, on Gmail).
@@ -120,6 +123,29 @@ def exists(m, *criteria):
             if nums:
                 return True
         return False
+    finally:
+        _restore(m)
+
+
+def record(m, sender, subject, body=""):
+    """Leave a SILENT state marker: IMAP APPEND straight into \\All, flagged \\Seen. Nothing is
+    sent, so nothing notifies and it never shows in the inbox — for state that has no email of
+    its own to carry it (e.g. "this file set was staged and had nothing to book"). The only
+    write in this module.
+
+    Refuses (-> False) when the server advertises no \\All folder: the fallback would be INBOX,
+    and a marker sitting in the inbox is exactly the noise this exists to avoid."""
+    folders = _folders(m)
+    if not folders or folders[0] == "INBOX":
+        return False
+    msg = EmailMessage()
+    msg["From"] = msg["To"] = sender
+    msg["Subject"] = subject
+    msg.set_content(body or "State marker for the bookkeeping automation. Safe to ignore.")
+    try:
+        typ, _ = m.append(folders[0], "(\\Seen)", imaplib.Time2Internaldate(time.time()),
+                          msg.as_bytes())
+        return typ == "OK"
     finally:
         _restore(m)
 

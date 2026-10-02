@@ -97,11 +97,51 @@ def main():
     fails += not ok
     print(f"{'PASS' if ok else 'FAIL'}  {'memoised on connection':<28} -> {second}")
 
+    # record(): a silent marker goes into \\All, already read, and never into the inbox.
+    class AppendIMAP(FakeIMAP):
+        def __init__(self, lines):
+            super().__init__(lines)
+            self.appended, self.selected = [], []
+
+        def append(self, folder, flags, when, data):
+            self.appended.append((folder, flags, data))
+            return "OK", [b""]
+
+        def select(self, folder, readonly=False):
+            self.selected.append(folder)
+            return "OK", [b"1"]
+
+    m = AppendIMAP(GMAIL)
+    ok = mailbox_state.record(m, "me@x.com", "Staged, nothing to book [21095ec61b]")
+    folder, flags, data = m.appended[0] if m.appended else (None, None, b"")
+    checks = [
+        ("record: appends to All Mail", ok and folder == f'{Q}[Gmail]/All Mail{Q}'),
+        ("record: flagged read", flags == "(\\Seen)"),
+        ("record: carries the subject", b"Staged, nothing to book [21095ec61b]" in data),
+        ("record: leaves INBOX selected", m.selected[-1:] == ["INBOX"]),
+    ]
+    m = AppendIMAP(BARE)
+    checks.append(("record: refuses without \\All (never INBOX)",
+                   mailbox_state.record(m, "me@x.com", "x") is False and not m.appended))
+
+    # The marker subject must not trip any other lookup (substring, case-insensitive), and must
+    # carry "[hash]" so already_previewed finds it. Read from preview_email without importing it.
+    import ast
+    src = open(__file__.replace("test_mailbox_state.py", "preview_email.py")).read()
+    staged = next(ast.literal_eval(n.value) for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "STAGED_SUBJECT")
+    low = staged.lower()
+    for needle in ("booked", "bookkeeping", "didn't book", "still needed", "rental bookkeeping"):
+        checks.append((f"marker subject has no {needle!r}", needle not in low))
+    for name, ok in checks:
+        fails += not ok
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+
     print()
     if fails:
-        print(f"{fails} FAILURE(S) — folder discovery is broken.")
+        print(f"{fails} FAILURE(S) — mailbox state is broken.")
         sys.exit(1)
-    print(f"All {len(CASES) + 1} cases passed — folder discovery behaves.")
+    print(f"All {len(CASES) + 1 + len(checks)} cases passed — folder discovery and markers behave.")
 
 
 if __name__ == "__main__":

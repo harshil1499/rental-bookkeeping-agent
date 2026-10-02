@@ -95,6 +95,24 @@ def fileset_hash(names):
     return hashlib.sha256("\n".join(names).encode()).hexdigest()[:10]
 
 
+# Silent marker for a file set that staged with nothing to book (see main). Matched by
+# already_previewed's "[h]" search. No "booked" (receipt search), no "bookkeeping" (reminder
+# dedupe), no "Bookkeeping preview" (confirm scan / attachments). test_mailbox_state checks.
+STAGED_SUBJECT = "Staged, nothing to book"
+
+
+def record_staged(h):
+    m = imaplib.IMAP4_SSL("imap.gmail.com")
+    try:
+        m.login(USER, PW)
+        return mailbox_state.record(m, USER, f"{STAGED_SUBJECT} [{h}]")
+    finally:
+        try:
+            m.logout()
+        except Exception:
+            pass
+
+
 def already_previewed(h):
     """True if a preview email for this exact inbox set was ever sent — including one you
     have since archived or deleted. Searching INBOX alone made emptying the trash look like
@@ -364,12 +382,15 @@ def main():
     if not n_book:
         # An email that says "0 to book" asks nothing of you. Held statements waiting on their
         # Relay CSV sit here for weeks, and every one of those runs would otherwise be an email.
-        # Silence is correct: the 1st-of-month reminder is what asks for the missing files, and
-        # a failure alert is what breaks the silence if the automation itself is down.
-        # Cost of staying quiet: nothing records this file set, so the next poll re-stages the
-        # Import tabs (scratch tab only, never the ledger). Cheap, and it stops the moment
-        # anything is bookable — that sends one email, and the hash gate closes for good.
-        print(f"Nothing to book for inbox set [{h}] — staged only, no email sent.")
+        # Silence is correct: the reminder and the mid-month nudge ask for missing files, and a
+        # failure alert breaks the silence if the automation itself is down.
+        # Record the set anyway, with a silent marker (no send). Without it every poll re-staged
+        # all three sheets — the heaviest Sheets work there is — and on 2026-10-02 that ran the
+        # rate-limit retries to their last attempt; a month of polls means false failure alerts.
+        # A new file changes the set, so anything new still stages.
+        recorded = record_staged(h)
+        print(f"Nothing to book for inbox set [{h}] — staged only, no email sent"
+              f"{'; marked so later polls skip it' if recorded else ' (could not record; next poll re-stages)'}.")
         return
     needs, _months = still_needed.collect(svc, cfg)   # one definition across every email
     url = inbox_url(cfg)
