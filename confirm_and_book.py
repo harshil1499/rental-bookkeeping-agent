@@ -6,11 +6,16 @@ Step 3 (v1) of the automation roadmap. This is what closes the laptop-free loop:
     reminder -> drop files in Drive -> preview email -> reply "confirm" -> booked.
 
 Per run:
-  1. Look in the mailbox for a REPLY from you to a "Bookkeeping preview ... [hash]" email whose
-     first lines say `confirm`.
+  1. Look in the mailbox for a REPLY from you to a "Bookkeeping preview ... [hash]" email (or to a
+     "Didn't book [hash]" notice) whose first lines say `confirm`.
   2. Skip any hash already handled — mailbox-as-state idempotency, the same pattern as
      send_reminder.py / preview_email.py. A re-read can never double-book.
   3. Run `promote.py --write` and email a "Booked [hash]" summary (or "Bookkeeping ERROR [hash]").
+
+`--notices` (a separate workflow step, after booking): answer each reply of yours that did NOT
+book — no confirm word, unsupported edit syntax, or a confirm on a batch already booked — with a
+"Didn't book [hash]" email saying what was read and what to do. Never books. `--dry-run` prints
+what booking and notices would do, and does neither.
 
 Deliberate v1 limits, both load-bearing:
   - **Only the bare word `confirm` books.** The edit legend (`skip 7`, `3 -> Repairs`) is not
@@ -30,6 +35,7 @@ cryptographic. Worth knowing, since this is the one job that writes dollar figur
 Auth: Gmail app password in GMAIL_USER / GMAIL_APP_PASSWORD; service account via config.py.
 """
 import email as emaillib
+import hashlib
 import imaplib
 import os
 import re
@@ -38,8 +44,10 @@ import ssl
 import subprocess
 import sys
 import warnings
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 
 warnings.filterwarnings("ignore")
@@ -55,13 +63,18 @@ HERE = os.path.dirname(os.path.abspath(__file__)) or "."
 PREVIEW_SUBJECT = "Bookkeeping preview"
 BOOKED_SUBJECT = "Booked"
 ERROR_SUBJECT = "Bookkeeping ERROR"
+NOTICE_SUBJECT = "Didn't book"          # wording is load-bearing — see notice_subject()
+NOTICE_WINDOW = timedelta(days=7)
 HASH_RE = re.compile(r"\[([0-9a-f]{6,16})\]")
+REF_RE = re.compile(r"\bref ([0-9a-f]{8})\b")
 # Where the quoted original begins. This is a SAFETY control, not cosmetics: the preview's own
 # second line reads "Nothing is booked until you reply 'confirm'", so if a client quotes the
 # original without ">" markers, a blank reply would otherwise look like a confirmation and
-# auto-book. Stop at any marker that can begin the quoted message.
+# auto-book. Stop at any marker that can begin the quoted message — including the heading of a
+# "Didn't book" notice, which also says "reply confirm" and can also be replied to.
 QUOTE_RE = re.compile(
-    r"^\s*(>|on .+wrote:|-+\s*original message|from:\s|sent from |bookkeeping preview\b)", re.I)
+    r"^\s*(>|on .+wrote:|-+\s*original message|from:\s|sent from |bookkeeping preview\b"
+    r"|didn.t book\b)", re.I)
 
 
 def q(s):
@@ -197,9 +210,10 @@ def plain_body(msg):
 EDIT_SYNTAX_RE = re.compile(r"\bexcept\b|\bskip\s+\d|\d\s*(->|→|=)\s*\S")
 
 
-def intent(body):
-    """Read only the lines ABOVE the quoted original. The preview email itself contains the word
-    'confirm' in its legend, so scanning the whole body would make every reply self-trigger."""
+def reply_head(body):
+    """-> the lines typed ABOVE the quoted original (at most six). The preview email itself
+    contains the word 'confirm' in its legend, so scanning the whole body would make every reply
+    self-trigger."""
     head = []
     for line in body.splitlines():
         s = line.strip()
@@ -210,7 +224,12 @@ def intent(body):
         head.append(s)
         if len(head) >= 6:
             break
-    text = " ".join(head).lower()
+    return head
+
+
+def intent(body):
+    """-> 'confirm' | 'edit' | 'hold' | None, read from reply_head() only."""
+    text = " ".join(reply_head(body)).lower()
     if re.search(r"\bconfirm\b", text):
         if EDIT_SYNTAX_RE.search(text):
             return "edit"          # asked for something we cannot do — book nothing
@@ -220,44 +239,85 @@ def intent(body):
     return None
 
 
-def subjects_matching(m, needle):
-    """-> set of hashes found in subjects containing `needle`, anywhere in the account.
+def sent_at(msg):
+    """-> the message's Date header as an aware datetime, or None if absent/unparseable."""
+    try:
+        d = parsedate_to_datetime(header_text(msg, "Date"))
+    except Exception:
+        return None
+    return d if d is not None and d.tzinfo is not None else None
+
+
+def receipts(m, needle):
+    """-> {hash: earliest Date (or None)} for subjects containing `needle`, anywhere in the account.
 
     This answers "did I already book this?", so it has to survive you tidying your inbox —
     a receipt you archived or deleted still means the batch was booked. Searching INBOX
     alone would let a deleted receipt re-open a batch that already hit the ledger.
     """
-    out = set()
-    for raw in mailbox_state.fetch(m, ("SUBJECT", q(needle)), "(BODY[HEADER.FIELDS (SUBJECT)])"):
+    out = {}
+    for raw in mailbox_state.fetch(m, ("SUBJECT", q(needle)),
+                                   "(BODY[HEADER.FIELDS (SUBJECT DATE)])"):
         head = emaillib.message_from_bytes(raw if isinstance(raw, bytes) else bytes(raw))
         found = HASH_RE.search(header_text(head, "Subject"))
+        if not found:
+            continue
+        h, when = found.group(1), sent_at(head)
+        if h not in out or (when and (out[h] is None or when < out[h])):
+            out[h] = when
+    return out
+
+
+def notified_refs(m):
+    """-> refs of replies already answered by a notice. A state lookup like receipts(), so an
+    archived or deleted notice still counts and a reply is never answered twice."""
+    out = set()
+    for raw in mailbox_state.fetch(m, ("FROM", q(USER), "SUBJECT", q(NOTICE_SUBJECT)),
+                                   "(BODY[HEADER.FIELDS (SUBJECT)])"):
+        head = emaillib.message_from_bytes(raw if isinstance(raw, bytes) else bytes(raw))
+        found = REF_RE.search(header_text(head, "Subject"))
         if found:
             out.add(found.group(1))
     return out
 
 
-def handled_hashes(m):
-    """Hashes already booked or already alerted on — never processed twice."""
-    return subjects_matching(m, BOOKED_SUBJECT) | subjects_matching(m, ERROR_SUBJECT)
+def reply_ref(msg):
+    """-> 8-hex id for one reply, stable across runs (keyed on Message-ID)."""
+    key = header_text(msg, "Message-ID") or (header_text(msg, "Date") + header_text(msg, "Subject"))
+    return hashlib.sha1(key.strip().encode()).hexdigest()[:8]
 
 
-def pending_confirmations(m):
-    """-> hashes the owner replied `confirm` to that haven't been handled yet.
+def has_files(msg):
+    return any(part.get_filename() for part in msg.walk() if not part.is_multipart())
 
-    INBOX-only, deliberately, while `handled_hashes` searches everywhere. This is the one
-    read that leads to a ledger write, so it stays as narrow as possible: deleting a preview
-    withdraws it. The asymmetry is the safe direction — forgetting a receipt could double-book,
-    forgetting a preview just means nothing happens.
+
+def scan(m):
+    """-> dict: confirmed hashes plus everything the notice rules need.
+
+    The confirm read is INBOX-only, deliberately, while the state lookups search everywhere.
+    It is the one read that leads to a ledger write, so it stays as narrow as possible:
+    deleting a preview (or a notice) withdraws it. The asymmetry is the safe direction —
+    forgetting a receipt could double-book, forgetting a preview just means nothing happens.
+
+    A reply counts on a preview thread OR on a "Didn't book" notice thread: the notice tells you
+    to reply `confirm` to it, and both carry the batch hash in the subject. Every other gate is
+    identical for the two.
     """
-    # handled_hashes() FIRST, because it selects other folders and comes back. IMAP sequence
+    # State lookups FIRST, because they select other folders and come back. IMAP sequence
     # numbers are scoped to a SELECT, so searching INBOX and then re-selecting it mid-loop
     # could renumber the results underneath us if mail arrived in between — and this loop
     # ends in a ledger write. Gather the cross-folder state, then search INBOX and use it.
-    handled, found = handled_hashes(m), []
-    typ, data = m.search(None, "FROM", q(USER), "SUBJECT", q(PREVIEW_SUBJECT))
+    booked_at = receipts(m, BOOKED_SUBJECT)
+    handled = set(booked_at) | set(receipts(m, ERROR_SUBJECT))
+    notified = notified_refs(m)
+    out = {"found": [], "replies": [], "handled": handled, "booked_at": booked_at,
+           "notified": notified}
+    typ, data = m.search(None, "FROM", q(USER),
+                         "OR", "SUBJECT", q(PREVIEW_SUBJECT), "SUBJECT", q(NOTICE_SUBJECT))
     if typ != "OK" or not data or not data[0]:
-        print("  scan: no messages matched the preview subject in INBOX.")
-        return []
+        print("  scan: no messages matched the preview or notice subject in INBOX.")
+        return out
+    found = out["found"]
     # Why count: every `continue` below is a silent drop, and the caller's only output was
     # "No new 'confirm' replies" — which reads identically whether there were no replies or
     # four were found and thrown away. That ambiguity cost a two-day-late close on 2026-08-02.
@@ -272,7 +332,7 @@ def pending_confirmations(m):
         msg = emaillib.message_from_bytes(raw[0][1])
         subject = header_text(msg, "Subject")         # decoded — see header_text()
         if not subject.lower().lstrip().startswith("re:"):
-            seen["not a reply"] += 1                  # the original preview, not a reply
+            seen["not a reply"] += 1                  # a preview or notice itself, not a reply
             continue
         if USER.lower() not in header_text(msg, "From").lower():
             seen["not from owner"] += 1               # only act on mail from the owner
@@ -282,10 +342,14 @@ def pending_confirmations(m):
             seen["no hash"] += 1
             continue
         h = h.group(1)
+        body = plain_body(msg)
+        what = intent(body)
+        out["replies"].append({"hash": h, "intent": what, "said": " / ".join(reply_head(body)),
+                               "ref": reply_ref(msg), "sent": sent_at(msg),
+                               "files": has_files(msg)})
         if h in handled or h in found:
             seen["already handled"] += 1
             continue
-        what = intent(plain_body(msg))
         if what == "edit":
             seen["used unsupported edit syntax — nothing booked"] += 1
             continue
@@ -294,9 +358,107 @@ def pending_confirmations(m):
             continue
         found.append(h)
     dropped = ", ".join(f"{n} {why}" for why, n in seen.items() if n)
-    print(f"  scan: {len(data[0].split())} message(s) on preview threads; "
+    print(f"  scan: {len(data[0].split())} message(s) on preview/notice threads; "
           f"{len(found)} confirmed{f'; skipped {dropped}' if dropped else ''}.")
-    return found
+    return out
+
+
+# --- "Didn't book" notices -------------------------------------------------------------------
+# A reply that doesn't book used to produce nothing but a line in a CI log, and that silence cost
+# a two-day-late close in August and a stuck September in October. A notice goes out ONLY when a
+# reply of yours didn't do what it looked like it was trying to do — never as reassurance (see
+# the no-actionless-notifications rule). Runs as its own workflow step (`--notices`) after
+# booking, so a notice failure can never be mistaken for a ledger failure.
+
+def notice_for(r, *, handled, booked_at, notified, confirmed, now):
+    """-> 'unread' | 'edit' | 'already' | None for one reply record from scan(). Pure."""
+    if r["files"]:
+        return None      # attaching files to a reply is how files are sent; the next preview covers it
+    if r["sent"] is None or now - r["sent"] > NOTICE_WINDOW:
+        return None      # stale mail: no burst of notices on deploy or on old threads
+    if r["ref"] in notified:
+        return None      # one notice per reply, ever
+    h, what = r["hash"], r["intent"]
+    if h in handled:
+        booked = booked_at.get(h)
+        if booked and what in ("confirm", "edit") and r["sent"] > booked:
+            return "already"   # asked for something on a batch that had already landed
+        return None      # incl. the reply that caused the booking, and ERROR-handled batches
+    if h in confirmed:
+        return None      # a confirm for this batch is waiting; the next booking run takes it
+    if what is None:
+        return "unread"
+    if what == "edit":
+        return "edit"
+    return None          # 'hold' was meant
+
+
+def due_notices(s, now):
+    """-> [(reply, kind)] to send, from a scan() result."""
+    out, refs = [], set()
+    confirmed = {r["hash"] for r in s["replies"] if r["intent"] == "confirm"} - s["handled"]
+    for r in s["replies"]:
+        kind = notice_for(r, handled=s["handled"], booked_at=s["booked_at"],
+                          notified=s["notified"], confirmed=confirmed, now=now)
+        if kind and r["ref"] not in refs:
+            refs.add(r["ref"])
+            out.append((r, kind))
+    return out
+
+
+def notice_subject(h, ref):
+    """Every word is load-bearing. IMAP SUBJECT search is a case-insensitive SUBSTRING match, and
+    other lookups key off subjects:
+      - no "booked": receipts() searches "Booked", so "Not booked [h]" would mark the batch
+        handled and silently swallow the very confirm the notice asks for;
+      - no "Bookkeeping preview": email_docs' attachment reader searches it;
+      - no "bookkeeping": send_reminder dedupes on "bookkeeping" + the month;
+      - ASCII only, so the ref lookup never depends on how a server decodes RFC 2047.
+    `[h]` is what makes a `confirm` reply to the notice book that batch."""
+    return f"{NOTICE_SUBJECT} [{h}] - ref {ref}"
+
+
+def _when(dt):
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime("%b %-d at %-I:%M %p ET")
+    except Exception:
+        return dt.astimezone(timezone.utc).strftime("%b %d %H:%M UTC")
+
+
+def render_notice(r, kind, booked_at):
+    """-> (subject, text, html). Stdlib only; the first line of both bodies is the heading,
+    which QUOTE_RE treats as the start of a quote, so a blank reply to a notice books nothing."""
+    import html as htmllib
+    said = r["said"] if len(r["said"]) <= 140 else r["said"][:137] + "..."
+    if kind == "already":
+        lead = (f"That batch was already booked on {_when(booked_at[r['hash']])}, before your "
+                f"reply (“{said}”). Nothing new was booked.")
+        act = "To change a booked row, edit it in the month tab by hand."
+    elif kind == "edit":
+        lead = (f"Your reply asked for a change (“{said}”). Changes in replies aren't "
+                f"supported, so nothing was booked.")
+        act = "Make the change in the sheet's Import tab, then reply confirm to this email."
+    elif said:
+        lead = (f"Your reply didn't book anything. I read it as “{said}”, and only the "
+                f"word confirm books.")
+        act = "To book this batch, reply confirm to this email."
+    else:
+        lead = ("Your reply came through empty: I couldn't read any text above the quoted "
+                "preview, so nothing was booked.")
+        act = "To book this batch, reply confirm to this email."
+    foot = f"ref {r['ref']} · batch [{r['hash']}]"
+    text = f"{NOTICE_SUBJECT}\n\n{lead}\n\n{act}\n\n{foot}\n"
+    e = htmllib.escape
+    html = (
+        "<div style=\"font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+        "color:#1f2328;background:#ffffff;font-size:15px;line-height:1.5;max-width:680px;"
+        "margin:0 auto;padding:16px 18px 22px\">"
+        f'<h2 style="font-size:19px;font-weight:600;margin:0 0 6px">{e(NOTICE_SUBJECT)}</h2>'
+        f'<p style="margin:0 0 12px">{e(lead)}</p>'
+        f'<p style="margin:0 0 16px;font-weight:600">{e(act)}</p>'
+        f'<p style="margin:0;color:#8b949e;font-size:12px">{e(foot)}</p></div>')
+    return notice_subject(r["hash"], r["ref"]), text, html
 
 
 def run_promote():
@@ -409,11 +571,11 @@ def render_summary(props, booked, missed, output, ok):
     return n_booked, text, html
 
 
-def send_summary(h, ok, text, html):
+def send(subject, text, html):
     msg = EmailMessage()
     msg["From"] = USER
     msg["To"] = USER
-    msg["Subject"] = f"{BOOKED_SUBJECT} [{h}]" if ok else f"{ERROR_SUBJECT} [{h}]"
+    msg["Subject"] = subject
     msg.set_content(text)
     msg.add_alternative(html, subtype="html")
     ctx = ssl.create_default_context()
@@ -423,12 +585,45 @@ def send_summary(h, ok, text, html):
         s.send_message(msg)
 
 
-def main():
+def send_summary(h, ok, text, html):
+    send(f"{BOOKED_SUBJECT} [{h}]" if ok else f"{ERROR_SUBJECT} [{h}]", text, html)
+
+
+def send_notices(s, dry_run):
+    due = due_notices(s, datetime.now(timezone.utc))
+    if not due:
+        print("No replies need a notice.")
+        return
+    for r, kind in due:
+        subject, text, html = render_notice(r, kind, s["booked_at"])
+        if dry_run:
+            print(f"  would send: {subject}  ({kind}; read as {r['said']!r})")
+            continue
+        send(subject, text, html)
+        print(f"Notice sent: {subject}  ({kind})")
+
+
+def main(argv):
+    """Default: book confirmed batches (the workflow's ledger step). `--notices`: answer replies
+    that didn't book; never books. `--dry-run`: print what both would do; sends and books nothing."""
+    unknown = set(argv) - {"--dry-run", "--notices"}
+    if unknown:     # a typo'd flag must not fall through to the mode that writes the ledger
+        sys.exit(f"Unknown argument(s): {' '.join(sorted(unknown))}")
+    dry_run, notices = "--dry-run" in argv, "--notices" in argv
     m = imap_connect()
     try:
-        pending = pending_confirmations(m)
+        s = scan(m)
     finally:
         logout(m)
+    pending = s["found"]
+
+    if dry_run:
+        print(f"Would book: {', '.join(pending) or 'nothing'}")
+        send_notices(s, dry_run=True)
+        return
+    if notices:
+        send_notices(s, dry_run=False)
+        return
 
     if not pending:
         print("No new 'confirm' replies — nothing to book.")
@@ -449,4 +644,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
