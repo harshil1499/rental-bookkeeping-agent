@@ -2,8 +2,8 @@
 """
 email_docs.py — documents attached to an email reply, as a pipeline input source.
 
-A second way in, alongside the Drive inbox: reply to the monthly reminder (or to a preview)
-with the month's Relay CSVs / mortgage statements / AppFolio export attached, and they feed the
+A second way in, alongside the Drive inbox: reply to the monthly reminder (or to a preview, or
+to a "Didn't book" notice) with the month's Relay CSVs / mortgage statements / AppFolio export attached, and they feed the
 same staging -> preview -> confirm flow. The Drive drop stays the primary path; this is additive.
 
 Why the attachments are re-read from Gmail on every run instead of being copied into Drive:
@@ -37,8 +37,12 @@ import mailbox_state
 USER = os.environ.get("GMAIL_USER", "")
 PW = os.environ.get("GMAIL_APP_PASSWORD", "")
 
-# Only messages carrying one of our own subjects are considered.
-SUBJECT_MARKERS = ("Bookkeeping preview", "Rental bookkeeping")
+# Only messages carrying one of our own subjects are considered. "Didn't book" must match
+# confirm_and_book.NOTICE_SUBJECT (not imported: that module needs Gmail creds at import, and this
+# one must work without them). A reply with files skips the didn't-book notice on the promise that
+# the next preview picks the files up — that only holds if notice threads are read here too.
+# test_notices.py checks the two stay in step.
+SUBJECT_MARKERS = ("Bookkeeping preview", "Rental bookkeeping", "Didn't book")
 
 _CACHE = None  # per-process memo; a single poll asks for these more than once
 

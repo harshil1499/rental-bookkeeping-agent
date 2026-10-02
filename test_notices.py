@@ -241,6 +241,47 @@ _s, got = quiet(lambda: run([(INBOX, mail(f"Bookkeeping preview — 31 to book [
                              (ALL, mail(f"Booked [{OLD}]", when=ago(days=60)))]))
 check("deploy day: July's handled confirm stays silent", got == [], repr(got))
 
+# --- 4. Files sent on a notice thread reach the pipeline -------------------------------------
+# A reply with files gets no notice, on the promise that the next preview picks them up. That
+# only holds if email_docs reads notice threads. Parity is checked without importing email_docs
+# (it needs pymupdf, and this file stays stdlib-only)...
+import ast  # noqa: E402
+
+src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_docs.py")).read()
+markers = next(ast.literal_eval(n.value) for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "SUBJECT_MARKERS")
+check("email_docs reads notice threads (marker parity)", cb.NOTICE_SUBJECT in markers, repr(markers))
+
+# ...and end to end through the real reader wherever pymupdf is installed. CI always has it, so
+# there a missing import is a failure, not a skip.
+try:
+    import email_docs
+except ImportError as e:
+    if os.environ.get("CI"):
+        check("email_docs importable in CI", False, str(e))
+    else:
+        print(f"SKIP  email_docs end-to-end (no pymupdf locally: {e})")
+else:
+    def docs(msgs):
+        fake = FakeIMAP(msgs)
+        fake.login = fake.logout = lambda *a: ("OK", [b""])
+        email_docs.USER, email_docs.PW, email_docs._CACHE = OWNER, "x", None
+        email_docs.imaplib.IMAP4_SSL = lambda *_a, **_k: fake
+        return quiet(email_docs.names)
+    real_ssl = email_docs.imaplib.IMAP4_SSL
+    try:
+        check("files on a reply to a notice are picked up",
+              docs([(ALL, mail(sub)), (ALL, mail("Re: " + sub, "here", files=True))])
+              == ["Relay 2026-09-01 #6692.csv"])
+        check("files on an archived reply to a notice still count",
+              docs([(ALL, mail("Re: " + sub, "here", files=True))]) == ["Relay 2026-09-01 #6692.csv"])
+        check("files on a notice reply from someone else are ignored",
+              docs([(ALL, mail("Re: " + sub, "here", files=True, sender="x@y.com"))]) == [])
+        check("files on a preview reply still picked up (no regression)",
+              docs([(ALL, mail("Re: " + PREVIEW, "here", files=True))]) == ["Relay 2026-09-01 #6692.csv"])
+    finally:
+        email_docs.imaplib.IMAP4_SSL, email_docs._CACHE = real_ssl, None
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {', '.join(failures)}")

@@ -411,7 +411,8 @@ def notice_subject(h, ref):
     other lookups key off subjects:
       - no "booked": receipts() searches "Booked", so "Not booked [h]" would mark the batch
         handled and silently swallow the very confirm the notice asks for;
-      - no "Bookkeeping preview": email_docs' attachment reader searches it;
+      - no "Bookkeeping preview": the confirm scan would read the notice itself as a preview
+        (email_docs reads attachments on notice threads ON PURPOSE, via its own marker);
       - no "bookkeeping": send_reminder dedupes on "bookkeeping" + the month;
       - ASCII only, so the ref lookup never depends on how a server decodes RFC 2047.
     `[h]` is what makes a `confirm` reply to the notice book that batch."""
