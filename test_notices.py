@@ -107,7 +107,7 @@ ago = lambda **kw: NOW - timedelta(**kw)  # noqa: E731
 
 
 def run(msgs):
-    s = cb.scan(FakeIMAP(msgs))
+    s = cb.scan(FakeIMAP(msgs), now=NOW)
     return s, [(r["said"], kind) for r, kind in cb.due_notices(s, NOW)]
 
 
@@ -241,6 +241,26 @@ _s, got = quiet(lambda: run([(INBOX, mail(f"Bookkeeping preview — 31 to book [
                                           "confirm", when=ago(days=60))),
                              (ALL, mail(f"Booked [{OLD}]", when=ago(days=60)))]))
 check("deploy day: July's handled confirm stays silent", got == [], repr(got))
+
+# --- 3b. Stale confirms never book --------------------------------------------------------
+# 2026-10-04: Gmail purged July's trashed receipt (Trash empties after 30 days), so batch
+# 280faa2e21 read as unhandled and the August confirm still in INBOX re-ran booking. Only the
+# promoted stamps kept it at 0 rows. A confirm now counts only while it's under 7 days old.
+JULY = f"Bookkeeping preview \u2014 31 to book [{OLD}]"
+s, _ = quiet(lambda: run([(INBOX, mail(PREVIEW)), (INBOX, mail("Re: " + PREVIEW, "confirm", when=ago(days=6)))]))
+check("confirm 6 days old still books", s["found"] == [H], repr(s["found"]))
+s, _ = quiet(lambda: run([(INBOX, mail(PREVIEW)), (INBOX, mail("Re: " + PREVIEW, "confirm", when=ago(days=8)))]))
+check("confirm 8 days old is ignored", s["found"] == [], repr(s["found"]))
+s, _ = quiet(lambda: run([(INBOX, mail(JULY, when=ago(days=62))),
+                          (INBOX, mail("Re: " + JULY, "confirm", when=ago(days=60)))]))   # receipt purged
+check("Oct 4 replay: purged receipt + old confirm -> no booking", s["found"] == [], repr(s["found"]))
+undated = mail("Re: " + PREVIEW, "confirm")
+del undated["Date"]
+s, _ = quiet(lambda: run([(INBOX, mail(PREVIEW)), (INBOX, undated)]))
+check("undated confirm is ignored (fails closed)", s["found"] == [], repr(s["found"]))
+s, _ = quiet(lambda: run([(INBOX, mail(PREVIEW)), (INBOX, mail(sub, when=ago(days=9))),
+                          (INBOX, mail("Re: " + sub, "confirm", when=ago(days=8)))]))
+check("old confirm on a notice is ignored too", s["found"] == [], repr(s["found"]))
 
 # --- 4. Files sent on a notice thread reach the pipeline -------------------------------------
 # A reply with files gets no notice, on the promise that the next preview picks them up. That

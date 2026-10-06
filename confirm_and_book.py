@@ -65,6 +65,11 @@ BOOKED_SUBJECT = "Booked"
 ERROR_SUBJECT = "Bookkeeping ERROR"
 NOTICE_SUBJECT = "Didn't book"          # wording is load-bearing — see notice_subject()
 NOTICE_WINDOW = timedelta(days=7)
+# A confirm only counts while it's fresh. Polls run every few hours, so a real confirm is acted on
+# within hours; 7 days still covers a long outage. Without this, a batch re-opens whenever its
+# receipt disappears: Gmail purges Trash after 30 days, and on 2026-10-04 July's purged receipt
+# let an August confirm re-run booking (0 rows written, saved only by the promoted stamps).
+CONFIRM_WINDOW = timedelta(days=7)
 HASH_RE = re.compile(r"\[([0-9a-f]{6,16})\]")
 REF_RE = re.compile(r"\bref ([0-9a-f]{8})\b")
 # Where the quoted original begins. This is a SAFETY control, not cosmetics: the preview's own
@@ -291,7 +296,7 @@ def has_files(msg):
     return any(part.get_filename() for part in msg.walk() if not part.is_multipart())
 
 
-def scan(m):
+def scan(m, now=None):
     """-> dict: confirmed hashes plus everything the notice rules need.
 
     The confirm read is INBOX-only, deliberately, while the state lookups search everywhere.
@@ -321,8 +326,10 @@ def scan(m):
     # Why count: every `continue` below is a silent drop, and the caller's only output was
     # "No new 'confirm' replies" — which reads identically whether there were no replies or
     # four were found and thrown away. That ambiguity cost a two-day-late close on 2026-08-02.
+    now = now or datetime.now(timezone.utc)
     seen = {"unfetchable": 0, "not a reply": 0, "not from owner": 0, "no hash": 0,
             "already handled": 0, "no confirm word": 0,
+            "confirm older than 7 days (or undated) — ignored": 0,
             "used unsupported edit syntax — nothing booked": 0}
     for num in data[0].split():
         typ, raw = m.fetch(num, "(RFC822)")
@@ -355,6 +362,10 @@ def scan(m):
             continue
         if what != "confirm":
             seen["no confirm word"] += 1
+            continue
+        sent = out["replies"][-1]["sent"]
+        if sent is None or now - sent > CONFIRM_WINDOW:
+            seen["confirm older than 7 days (or undated) — ignored"] += 1   # fail closed
             continue
         found.append(h)
     dropped = ", ".join(f"{n} {why}" for why, n in seen.items() if n)
