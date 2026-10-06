@@ -82,12 +82,17 @@ def _split_records(text):
     space between date+type and between amount+balance, so we anchor on 'DATE TYPE' and
     take everything up to the next such anchor as the record body.
     """
-    anchor = re.compile(r'(\d{1,2}/\d{1,2}/\d{4})\s*(' + "|".join(TXN_TYPES) + r')')
+    # Multi-word types match across any whitespace: the print wraps "Owner Disbursement" onto two
+    # lines. Matching only a literal space missed every payout row, which then merged into the
+    # Cash Out above it and took its amount (8/11 gate $100 -> $2,587.19 payout; 9/22 tub $325 ->
+    # $1,360.14), failing reconcile by +3,522.33 on the first export that contained payouts.
+    types = "|".join(re.escape(t).replace(r"\ ", r"\s+") for t in TXN_TYPES)
+    anchor = re.compile(r'(\d{1,2}/\d{1,2}/\d{4})\s*(' + types + r')')
     hits = list(anchor.finditer(text))
     for i, m in enumerate(hits):
         end = hits[i + 1].start() if i + 1 < len(hits) else len(text)
         body = text[m.end():end]
-        yield m.group(1), m.group(2), body
+        yield m.group(1), re.sub(r"\s+", " ", m.group(2)), body
 
 
 def _classify(txtype, party, desc):

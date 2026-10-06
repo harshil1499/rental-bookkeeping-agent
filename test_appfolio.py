@@ -90,6 +90,58 @@ check("Cash In stays positive income", rows["Rent Income"]["amount"] == 2000.0
 ok, msg = appfolio.reconcile(parsed)
 check("reconcile passes when every Cash Out is counted", ok, msg)
 
+# --- Part 1b: owner payouts wrapped across lines ------------------------------------------
+# The 10/2 full-YTD export printed "Owner\nDisbursement". Unmatched, each payout merged into the
+# Cash Out above it: the $100 gate repair read as -$2,587.19, the $325 tub repair as -$1,360.14.
+WRAPPED = """AppFolio Owner Portal
+Transactions
+Total Cash In
+2,000.00
+Cash Out
+-425.00
+Owner Disbursements
+-3,947.33
+Date Type Party Property Description Amount Balance
+8/7/2026Cash Out
+Acme Maintenance
+123 Main Street
+Fix the backyard gate
+-100.00
+4,500.00
+8/11/2026Owner
+Disbursement
+Owner Trust
+123 Main Street
+Owner payout
+-2,587.19
+1,912.81
+9/9/2026Cash Out
+Acme Maintenance
+123 Main Street
+Tub/Shower Valve & Stem Repair
+-325.00
+1,587.81
+9/22/2026 Owner
+Disbursement
+Owner Trust
+123 Main Street
+Owner payout
+-1,360.14
+227.67
+"""
+p2 = appfolio.parse_appfolio_pdf(WRAPPED)
+by_desc = {r["payee"].split(" — ")[-1]: r for r in p2["rows"]}
+check("wrapped payout rows are found (4 rows, not 2)", len(p2["rows"]) == 4, f"{len(p2['rows'])} rows")
+check("gate repair keeps its own $100", by_desc.get("Fix the backyard gate", {}).get("amount") == -100.0,
+      repr(by_desc.get("Fix the backyard gate", {}).get("amount")))
+check("tub repair keeps its own $325",
+      by_desc.get("Tub/Shower Valve & Stem Repair", {}).get("amount") == -325.0)
+payouts = [r for r in p2["rows"] if r["_txtype"] == "Owner Disbursement"]
+check("payouts are transfers, never expenses",
+      len(payouts) == 2 and all(r["type"] == "Transfer" for r in payouts))
+ok2, msg2 = appfolio.reconcile(p2)
+check("export with payouts reconciles", ok2, msg2)
+
 # --- Part 2: which export gets staged -------------------------------------------------------
 NAME = "AppFolio Owner Portal _ Transactions.pdf"
 
