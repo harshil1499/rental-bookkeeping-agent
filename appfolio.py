@@ -33,7 +33,10 @@ import config
 # Which sheet this statement feeds, detected by the property address on the rows (config.py).
 PROPERTY_MATCH = config.APPFOLIO_PROPERTY_MATCH
 
-TXN_TYPES = ("Contribution", "Cash Out", "Cash In", "Owner Disbursement")
+# "Disbursement" alone is how the 10/2 full-YTD export labels owner payouts ("09/09/2026
+# Disbursement Harshil Shah Trust ... Owner payment for 09/2026"); it's normalized to "Owner
+# Disbursement". Unknown, each payout swallowed the Cash Out above it (see _split_records).
+TXN_TYPES = ("Contribution", "Cash Out", "Cash In", "Owner Disbursement", "Disbursement")
 
 # Description/party keyword -> (category, type, note). First match wins; order matters.
 # type "Expense"/"Income" book normally; "Review" is flagged for attention (never auto-booked).
@@ -92,7 +95,8 @@ def _split_records(text):
     for i, m in enumerate(hits):
         end = hits[i + 1].start() if i + 1 < len(hits) else len(text)
         body = text[m.end():end]
-        yield m.group(1), re.sub(r"\s+", " ", m.group(2)), body
+        txtype = re.sub(r"\s+", " ", m.group(2))
+        yield m.group(1), ("Owner Disbursement" if txtype == "Disbursement" else txtype), body
 
 
 def _classify(txtype, party, desc):

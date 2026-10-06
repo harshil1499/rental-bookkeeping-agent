@@ -142,6 +142,15 @@ check("payouts are transfers, never expenses",
 ok2, msg2 = appfolio.reconcile(p2)
 check("export with payouts reconciles", ok2, msg2)
 
+# The real 10/2 export's wording, verbatim shape: payouts typed just "Disbursement".
+REAL_WORDING = WRAPPED.replace("Owner\nDisbursement", "Disbursement").replace(
+    "9/22/2026 Owner\nDisbursement", "9/22/2026 Disbursement")
+p3 = appfolio.parse_appfolio_pdf(REAL_WORDING)
+pay3 = [r for r in p3["rows"] if r["_txtype"] == "Owner Disbursement"]
+check("'Disbursement' rows are payouts (transfers)", len(pay3) == 2 and all(r["type"] == "Transfer" for r in pay3),
+      f"{len(pay3)} payout rows")
+check("...and the export reconciles", appfolio.reconcile(p3)[0], appfolio.reconcile(p3)[1])
+
 # --- Part 2: which export gets staged -------------------------------------------------------
 NAME = "AppFolio Owner Portal _ Transactions.pdf"
 
