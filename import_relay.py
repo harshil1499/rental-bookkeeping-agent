@@ -467,6 +467,11 @@ def main():
                                 key=lambda r: r["date_obj"]):
                     print(f"        cash out {r['date_str']:>10} {r['_raw_amount']:>10,.2f}  "
                           f"{r['category']:<24} {r['payee'][:80]}")
+                # A record holding more than [amount, balance] usually swallowed the next one;
+                # print its raw text so the boundary the parser missed is visible.
+                for d, t, body in appfolio._split_records(appfolio._strip_boilerplate(src["text"])):
+                    if len(re.findall(r'-?[\d,]+\.\d{2}', body)) > 2:
+                        print(f"        merged? {d} {t}: {re.sub(r'\s+', ' ', body)[:300]!r}")
 
     if not groups:
         sys.exit("Nothing to process.")
