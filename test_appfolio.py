@@ -151,6 +151,21 @@ check("'Disbursement' rows are payouts (transfers)", len(pay3) == 2 and all(r["t
       f"{len(pay3)} payout rows")
 check("...and the export reconciles", appfolio.reconcile(p3)[0], appfolio.reconcile(p3)[1])
 
+# Categories on the 10/2 export's real descriptions. "Street" leaks into row text when the
+# address wraps; "tree" (a grounds keyword) used to match inside it.
+cat = lambda party, desc: appfolio._classify("Cash Out", party, desc)[0]  # noqa: E731
+check("utility bill with 'Street' in the text -> Utilities",
+      cat("Hoosier Homes 3135 East Minnesota", "Citizens Energy group Service -15.01 2,084.99 "
+          "Maintenance Street period: 07/9/26") == "Utilities")
+check("plain Citizens Energy bill -> Utilities",
+      cat("Hoosier Homes Maintenance", "Citizens Energy group Service period: 07/9/26 - 08/3/26") == "Utilities")
+check("'Street' alone no longer means grounds upkeep",
+      cat("Hoosier Homes", "Something on Main Street") == "Other")
+check("'Fix the backyard gate' -> Repairs", cat("Hoosier Homes Maintenance", "2549-1 - Fix the backyard gate") == "Repairs")
+check("tree trimming still grounds upkeep", cat("Acme", "Tree trimming") == "Cleaning and Maintenance")
+check("mowing still grounds upkeep", cat("Acme", "Mowing bills 05/11") == "Cleaning and Maintenance")
+check("water heater install is a repair, not a utility", cat("Acme", "Water heater install") == "Repairs")
+
 # --- Part 2: which export gets staged -------------------------------------------------------
 NAME = "AppFolio Owner Portal _ Transactions.pdf"
 

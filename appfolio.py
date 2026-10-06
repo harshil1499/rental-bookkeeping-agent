@@ -45,8 +45,13 @@ RULES = [
     (("management fee",), ("Management Fees", "Expense", "")),
     # Make-ready / turnover / inspection-driven repairs
     (("turn ", "turnover", "make ready", "make-ready", "fail list", "condition report",
-      "repair", "replace", "install", "hvac", "plumb", "appliance", "furnace", "roof"),
+      "repair", "replace", "install", "hvac", "plumb", "appliance", "furnace", "roof", "fix"),
      ("Repairs", "Expense", "")),
+    # Utility bills the PM pays (vacancy, turns, tenant-not-yet-transferred). Specific phrases
+    # only: a bare "water" would catch "water damage".
+    (("citizens energy", "energy group", "electric", "sewer", "utility", "utilities",
+      "gas service", "water service"),
+     ("Utilities", "Expense", "")),
     # Routine grounds/upkeep
     (("lawn", "mow", "grass", "landscap", "snow", "clean", "pest", "gutter", "tree"),
      ("Cleaning and Maintenance", "Expense", "")),
@@ -112,9 +117,11 @@ def _classify(txtype, party, desc):
                     "security deposit — returnable (mark Skip) OR forfeited=income (set Type=Income). "
                     "You flagged this tenant's as forfeited.")
         return "Rental Income", "Income", ""
-    # Cash Out (and any unclassified debit): categorize by description
+    # Cash Out (and any unclassified debit): categorize by description. Keywords match from a
+    # word start: plain substring matching filed a Citizens Energy bill under Cleaning and
+    # Maintenance because "tree" is inside "Street" (from the address in the row text).
     for keys, (cat, typ, note) in RULES:
-        if any(k in d for k in keys):
+        if any(re.search(r"\b" + re.escape(k), d) for k in keys):
             return cat, typ, note
     return "Other", "Review", "uncategorized PM payment — set a category in the Import tab"
 
