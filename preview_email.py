@@ -31,6 +31,7 @@ import ssl
 import subprocess
 import sys
 import textwrap
+import time
 import warnings
 from email.message import EmailMessage
 
@@ -369,6 +370,11 @@ def main():
         print("Inbox empty — nothing to preview.")
         return
     h = fileset_hash(names)
+    if FORCE:
+        # A forced re-preview gets its own id. Reusing the set's id broke on 2026-10-05: that id
+        # had already been booked, so a confirm on the re-preview would read as "already handled"
+        # and book nothing. The set's own id stays recorded, so scheduled polls still skip it.
+        h = fileset_hash(names + [f"forced {time.time()}"])
     if not FORCE and already_previewed(h):
         print(f"Preview for inbox set [{h}] already in mailbox — skipping.")
         return
