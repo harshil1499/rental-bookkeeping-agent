@@ -262,6 +262,67 @@ s, _ = quiet(lambda: run([(INBOX, mail(PREVIEW)), (INBOX, mail(sub, when=ago(day
                           (INBOX, mail("Re: " + sub, "confirm", when=ago(days=8)))]))
 check("old confirm on a notice is ignored too", s["found"] == [], repr(s["found"]))
 
+# --- 3c. "Waiting on your confirm" follow-ups ----------------------------------------------
+# 2026-10-02: files went in on the reminder thread, the preview they produced sat unanswered, and
+# nothing followed up. One follow-up per preview after 24h; never if answered/booked/replaced.
+def followups(msgs):
+    s = quiet(lambda: cb.scan(FakeIMAP(msgs), now=NOW))
+    return [p["hash"] for p in cb.due_followups(s, NOW)], s
+
+
+PREV_B = f"Bookkeeping preview \u2014 11 to book [{OLD}]"
+FU_CASES = [
+    ("unanswered 25h -> one follow-up", [(INBOX, mail(PREVIEW, when=ago(hours=25)))], [H]),
+    ("unanswered 23h -> not yet", [(INBOX, mail(PREVIEW, when=ago(hours=23)))], []),
+    ("answered 'hold' -> silence",
+     [(INBOX, mail(PREVIEW, when=ago(hours=30))), (INBOX, mail("Re: " + PREVIEW, "hold", when=ago(hours=29)))], []),
+    ("answered 'yes' -> silence (the notice covers it)",
+     [(INBOX, mail(PREVIEW, when=ago(hours=30))), (INBOX, mail("Re: " + PREVIEW, "yes", when=ago(hours=29)))], []),
+    ("booked -> silence",
+     [(INBOX, mail(PREVIEW, when=ago(hours=30))), (ALL, mail(f"Booked [{H}]", when=ago(hours=2)))], []),
+    ("replaced by a newer preview -> silence for both (newer is 2h old)",
+     [(INBOX, mail(PREVIEW, when=ago(hours=30))), (INBOX, mail(PREV_B, when=ago(hours=2)))], []),
+    ("replaced, newer is 26h old -> follow up the newer only",
+     [(INBOX, mail(PREVIEW, when=ago(hours=50))), (INBOX, mail(PREV_B, when=ago(hours=26)))], [OLD]),
+    ("already followed up (archived) -> silence",
+     [(INBOX, mail(PREVIEW, when=ago(hours=50))), (ALL, mail(f"Waiting on your confirm [{H}]", when=ago(hours=20)))], []),
+    ("already followed up (deleted) -> silence",
+     [(INBOX, mail(PREVIEW, when=ago(hours=50))), (TRASH, mail(f"Waiting on your confirm [{H}]", when=ago(hours=20)))], []),
+    ("15 days old -> silence (no backfill)", [(INBOX, mail(PREVIEW, when=ago(days=15)))], []),
+    ("preview you deleted -> silence", [(TRASH, mail(PREVIEW, when=ago(hours=30)))], []),
+]
+for name, msgs, want in FU_CASES:
+    got, _s = followups(msgs)
+    check(name, got == want, f"-> {got!r}" if got != want else "")
+
+fu = {"hash": H, "subject": PREVIEW, "sent": ago(hours=30),
+      "text": "Bookkeeping preview - 2 row(s) ready to book.\nReply 'confirm' to this email to book these rows.",
+      "html": "<div><h2>Bookkeeping preview</h2><p>Reply <strong>confirm</strong> to book.</p></div>"}
+fsub, ftext, fhtml = cb.render_followup(fu)
+check("follow-up subject: no booked/bookkeeping/didn't book, ASCII, has [hash]",
+      all(x not in fsub.lower() for x in ("booked", "bookkeeping", "didn't book", "still needed"))
+      and fsub.isascii() and (cb.HASH_RE.search(fsub) or [0, 0])[1] == H, repr(fsub))
+check("blank reply to a follow-up (unmarked quote) -> nothing", cb.intent(ftext) is None)
+check("blank reply to a follow-up ('>' quote) -> nothing",
+      cb.intent("\n".join("> " + ln for ln in ftext.splitlines())) is None)
+m = EmailMessage(); m.make_alternative(); m.add_alternative(f"<html><body><div><br></div>{fhtml}</body></html>", subtype="html")
+check("blank HTML reply to a follow-up -> nothing", cb.intent(cb.plain_body(m)) is None)
+check("'confirm' above the follow-up -> confirm", cb.intent("confirm\n\n" + ftext) == "confirm")
+s, _ = quiet(lambda: run([(INBOX, mail(PREVIEW, when=ago(hours=30))), (INBOX, mail(fsub, ftext, when=ago(hours=5))),
+                          (INBOX, mail("Re: " + fsub, "confirm\n\n" + ftext, when=ago(hours=1)))]))
+check("scan: confirm replying to a follow-up books its batch", s["found"] == [H], repr(s["found"]))
+_got, s = followups([(INBOX, mail(PREVIEW, when=ago(hours=3)))])
+w = cb.waiting_previews(s, NOW)
+check("reminder: an unanswered preview is listed as waiting", [x["subject"] for x in w] == [PREVIEW], repr(w))
+_got, s = followups([(INBOX, mail(PREVIEW, when=ago(hours=3))), (INBOX, mail("Re: " + PREVIEW, "confirm", when=ago(hours=1)))])
+check("reminder: an answered preview isn't", cb.waiting_previews(s, NOW) == [])
+import ast  # noqa: E402
+_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_docs.py")).read()
+_markers = next(ast.literal_eval(n.value) for n in ast.walk(ast.parse(_src))
+                if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "SUBJECT_MARKERS")
+check("email_docs reads replies to follow-ups (files attached)",
+      any(mk.lower() in fsub.lower() for mk in _markers), repr(_markers))
+
 # --- 4. Files sent on a notice thread reach the pipeline -------------------------------------
 # A reply with files gets no notice, on the promise that the next preview picks them up. That
 # only holds if email_docs reads notice threads. Parity is checked without importing email_docs

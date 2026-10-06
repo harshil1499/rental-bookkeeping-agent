@@ -45,7 +45,8 @@ PW = os.environ.get("GMAIL_APP_PASSWORD", "")
 # test_notices.py checks the two stay in step. "Still needed" likewise matches
 # still_needed.NUDGE_SUBJECT: the nudge asks you to reply with the missing files attached
 # (checked in test_still_needed.py).
-SUBJECT_MARKERS = ("Bookkeeping preview", "Rental bookkeeping", "Didn't book", "Still needed")
+SUBJECT_MARKERS = ("Bookkeeping preview", "Rental bookkeeping", "Didn't book", "Still needed",
+                   "Waiting on your confirm")   # = confirm_and_book.FOLLOWUP_SUBJECT
 
 _CACHE = None  # per-process memo; a single poll asks for these more than once
 

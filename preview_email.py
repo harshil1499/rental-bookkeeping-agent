@@ -223,7 +223,8 @@ def flags_of(p):
 def render_text(properties, n_book, h, needs, url):
     """Plain-text fallback for clients that don't render HTML."""
     L = [f"Bookkeeping preview - {n_book} row(s) ready to book.",
-         "Nothing is booked until you reply 'confirm'.", ""]
+         "Your files are in. Reply 'confirm' to this email to book these rows; "
+         "nothing is booked until you do.", ""]
     for p in properties:
         L.append(p["label"])
         L.append("-" * len(p["label"]))
@@ -337,8 +338,9 @@ def render_html(properties, n_book, h, needs, url):
         f'<div style="font-family:{FONT};color:{INK};background:#ffffff;font-size:15px;'
         f'line-height:1.5;max-width:680px;margin:0 auto;padding:16px 18px 22px">'
         f'<h2 style="font-size:19px;font-weight:600;margin:0 0 6px">Bookkeeping preview</h2>'
-        f'<p style="margin:0;color:{MUTED};font-size:14px">{headline} — nothing is booked '
-        f'until you reply <strong style="color:{INK}">confirm</strong>.</p>'
+        f'<p style="margin:0;color:{MUTED};font-size:14px">Your files are in: {headline}. '
+        f'Reply <strong style="color:{INK}">confirm</strong> to this email to book them; '
+        f'nothing is booked until you do.</p>'
         f'{body}'
         f'<h3 style="font-size:14px;font-weight:600;margin:28px 0 8px;'
         f'border-top:1px solid {LINE};padding-top:16px">Reply to book</h3>'

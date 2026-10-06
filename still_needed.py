@@ -199,6 +199,23 @@ def nudge(dry_run=False, today=None):
     print(f"Nudge sent: '{subj}' — {n} item(s).")
 
 
+def waiting_previews():
+    """-> previews still waiting on a confirm, for the reminder; None if the mailbox check fails
+    (the reminder then just omits the line)."""
+    try:
+        from datetime import timezone
+        import confirm_and_book as cb
+        m = cb.imap_connect()
+        try:
+            s = cb.scan(m)
+        finally:
+            cb.logout(m)
+        return cb.waiting_previews(s, datetime.now(timezone.utc))
+    except Exception as e:
+        print(f"  ! Couldn't check for previews waiting on a confirm ({str(e)[:100]}).")
+        return None
+
+
 def print_needs(needs):
     if not needs:
         print("  Nothing missing.")
@@ -222,8 +239,9 @@ def main(argv):
         import contextlib
         with contextlib.redirect_stdout(sys.stderr):
             needs, months = collect(today=today)
+            waiting = waiting_previews()
         print(json.dumps({"through": month_name(months[-1], today) if months else None,
-                          "needs": needs}))
+                          "needs": needs, "waiting": waiting}))
         return
     needs, months = collect(today=today)
     through = month_name(months[-1], today) if months else None

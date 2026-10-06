@@ -14,8 +14,10 @@ Per run:
 
 `--notices` (a separate workflow step, after booking): answer each reply of yours that did NOT
 book — no confirm word, unsupported edit syntax, or a confirm on a batch already booked — with a
-"Didn't book [hash]" email saying what was read and what to do. Never books. `--dry-run` prints
-what booking and notices would do, and does neither.
+"Didn't book [hash]" email saying what was read and what to do, and send ONE "Waiting on your
+confirm [hash]" follow-up for a preview that's had no reply for 24 hours. Never books. Replying
+`confirm` to either books its batch. `--dry-run` prints what booking, notices and follow-ups would
+do, and does none of it.
 
 Deliberate v1 limits, both load-bearing:
   - **Only the bare word `confirm` books.** The edit legend (`skip 7`, `3 -> Repairs`) is not
@@ -64,6 +66,9 @@ PREVIEW_SUBJECT = "Bookkeeping preview"
 BOOKED_SUBJECT = "Booked"
 ERROR_SUBJECT = "Bookkeeping ERROR"
 NOTICE_SUBJECT = "Didn't book"          # wording is load-bearing — see notice_subject()
+FOLLOWUP_SUBJECT = "Waiting on your confirm"   # see followup_subject() for the collision rules
+FOLLOWUP_AFTER = timedelta(hours=24)       # an unanswered preview gets ONE follow-up after this
+FOLLOWUP_MAX_AGE = timedelta(days=14)      # ...and none once it's this old (no deploy-day backfill)
 NOTICE_WINDOW = timedelta(days=7)
 # A confirm only counts while it's fresh. Polls run every few hours, so a real confirm is acted on
 # within hours; 7 days still covers a long outage. Without this, a batch re-opens whenever its
@@ -75,11 +80,12 @@ REF_RE = re.compile(r"\bref ([0-9a-f]{8})\b")
 # Where the quoted original begins. This is a SAFETY control, not cosmetics: the preview's own
 # second line reads "Nothing is booked until you reply 'confirm'", so if a client quotes the
 # original without ">" markers, a blank reply would otherwise look like a confirmation and
-# auto-book. Stop at any marker that can begin the quoted message — including the heading of a
-# "Didn't book" notice, which also says "reply confirm" and can also be replied to.
+# auto-book. Stop at any marker that can begin the quoted message — including the headings of a
+# "Didn't book" notice and a "Waiting on your confirm" follow-up, which also say "reply confirm"
+# and can also be replied to.
 QUOTE_RE = re.compile(
     r"^\s*(>|on .+wrote:|-+\s*original message|from:\s|sent from |bookkeeping preview\b"
-    r"|didn.t book\b)", re.I)
+    r"|didn.t book\b|waiting on your confirm\b)", re.I)
 
 
 def q(s):
@@ -315,10 +321,12 @@ def scan(m, now=None):
     booked_at = receipts(m, BOOKED_SUBJECT)
     handled = set(booked_at) | set(receipts(m, ERROR_SUBJECT))
     notified = notified_refs(m)
-    out = {"found": [], "replies": [], "handled": handled, "booked_at": booked_at,
-           "notified": notified}
-    typ, data = m.search(None, "FROM", q(USER),
-                         "OR", "SUBJECT", q(PREVIEW_SUBJECT), "SUBJECT", q(NOTICE_SUBJECT))
+    followed_up = set(receipts(m, FOLLOWUP_SUBJECT))
+    out = {"found": [], "replies": [], "previews": [], "handled": handled, "booked_at": booked_at,
+           "notified": notified, "followed_up": followed_up}
+    typ, data = m.search(None, "FROM", q(USER), "OR", "OR",
+                         "SUBJECT", q(PREVIEW_SUBJECT), "SUBJECT", q(NOTICE_SUBJECT),
+                         "SUBJECT", q(FOLLOWUP_SUBJECT))
     if typ != "OK" or not data or not data[0]:
         print("  scan: no messages matched the preview or notice subject in INBOX.")
         return out
@@ -339,7 +347,13 @@ def scan(m, now=None):
         msg = emaillib.message_from_bytes(raw[0][1])
         subject = header_text(msg, "Subject")         # decoded — see header_text()
         if not subject.lower().lstrip().startswith("re:"):
-            seen["not a reply"] += 1                  # a preview or notice itself, not a reply
+            seen["not a reply"] += 1                  # a preview, notice or follow-up itself
+            h = HASH_RE.search(subject)
+            if (h and subject.lower().lstrip().startswith(PREVIEW_SUBJECT.lower())
+                    and USER.lower() in header_text(msg, "From").lower()):
+                out["previews"].append({"hash": h.group(1), "subject": subject,
+                                        "sent": sent_at(msg), "text": plain_body(msg),
+                                        "html": html_part(msg)})
             continue
         if USER.lower() not in header_text(msg, "From").lower():
             seen["not from owner"] += 1               # only act on mail from the owner
@@ -369,9 +383,87 @@ def scan(m, now=None):
             continue
         found.append(h)
     dropped = ", ".join(f"{n} {why}" for why, n in seen.items() if n)
-    print(f"  scan: {len(data[0].split())} message(s) on preview/notice threads; "
+    print(f"  scan: {len(data[0].split())} message(s) on preview/notice/follow-up threads; "
           f"{len(found)} confirmed{f'; skipped {dropped}' if dropped else ''}.")
     return out
+
+
+def html_part(msg):
+    """-> the message's text/html part, decoded ("" if none)."""
+    for part in (msg.walk() if msg.is_multipart() else [msg]):
+        if part.get_content_type() == "text/html":
+            return _decoded(part)
+    return ""
+
+
+# --- "Waiting on your confirm" follow-ups ---------------------------------------------------
+# A preview that gets no reply used to wait forever in silence. On 2026-10-02 the owner emailed
+# files on the reminder thread, reasonably took that as done, and the preview those files produced
+# six minutes later sat unanswered. One follow-up per preview, after FOLLOWUP_AFTER, asking for the
+# confirm — never for a preview that was answered in any way, booked, or replaced by a newer one.
+
+def followup_due(p, *, handled, replied, followed_up, newest_sent, now):
+    """True if preview record `p` (from scan) should get its one follow-up now. Pure."""
+    h = p["hash"]
+    if h in handled or h in replied or h in followed_up:
+        return False     # booked/errored, answered somehow (notices cover non-confirms), or done
+    if p["sent"] is None:
+        return False
+    age = now - p["sent"]
+    if age < FOLLOWUP_AFTER or age > FOLLOWUP_MAX_AGE:
+        return False
+    return newest_sent is None or p["sent"] >= newest_sent   # a newer preview replaced this one
+
+
+def _unanswered(s):
+    replied = {r["hash"] for r in s["replies"]}
+    newest = max((p["sent"] for p in s["previews"] if p["sent"]), default=None)
+    return replied, newest
+
+
+def due_followups(s, now):
+    replied, newest = _unanswered(s)
+    out, seen = [], set()
+    for p in s["previews"]:
+        if p["hash"] not in seen and followup_due(p, handled=s["handled"], replied=replied,
+                                                  followed_up=s["followed_up"],
+                                                  newest_sent=newest, now=now):
+            seen.add(p["hash"])
+            out.append(p)
+    return out
+
+
+def waiting_previews(s, now):
+    """-> previews still waiting on a confirm (for the monthly reminder), newest only."""
+    replied, newest = _unanswered(s)
+    return [{"subject": p["subject"], "sent": p["sent"].isoformat()} for p in s["previews"]
+            if p["hash"] not in s["handled"] and p["hash"] not in replied and p["sent"]
+            and p["sent"] == newest and now - p["sent"] <= FOLLOWUP_MAX_AGE]
+
+
+def followup_subject(h):
+    """No "booked" (receipt search), no "bookkeeping" (reminder dedupe / attachment markers), no
+    "Didn't book", ASCII. `[h]` makes a confirm reply to it book that batch."""
+    return f"{FOLLOWUP_SUBJECT} [{h}]"
+
+
+def render_followup(p):
+    """-> (subject, text, html). The heading is the first line of both bodies, which QUOTE_RE
+    treats as the start of a quote, so a blank reply books nothing."""
+    import html as htmllib
+    when = _when(p["sent"])
+    lead = f"This preview from {when} hasn't had a reply, so nothing is booked yet."
+    act = "Reply confirm to this email to book it, or hold to keep it open."
+    text = (f"{FOLLOWUP_SUBJECT}\n\n{lead}\n\n{act}\n\n---- the preview ----\n\n{p['text']}")
+    e = htmllib.escape
+    html = ("<div style=\"font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+            "color:#1f2328;background:#ffffff;font-size:15px;line-height:1.5;max-width:680px;"
+            "margin:0 auto;padding:16px 18px 4px\">"
+            f'<h2 style="font-size:19px;font-weight:600;margin:0 0 6px">{e(FOLLOWUP_SUBJECT)}</h2>'
+            f'<p style="margin:0 0 8px">{e(lead)}</p>'
+            f'<p style="margin:0 0 4px;font-weight:600">{e(act)}</p></div>'
+            + (p["html"] or f"<pre>{e(p['text'])}</pre>"))
+    return followup_subject(p["hash"]), text, html
 
 
 # --- "Didn't book" notices -------------------------------------------------------------------
@@ -630,7 +722,15 @@ def send_summary(h, ok, text, html):
 
 
 def send_notices(s, dry_run):
-    due = due_notices(s, datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    for p in due_followups(s, now):
+        subject, text, html = render_followup(p)
+        if dry_run:
+            print(f"  would send: {subject}  (preview from {p['sent']:%Y-%m-%d %H:%M} UTC, no reply)")
+        else:
+            send(subject, text, html)
+            print(f"Follow-up sent: {subject}")
+    due = due_notices(s, now)
     if not due:
         print("No replies need a notice.")
         return
