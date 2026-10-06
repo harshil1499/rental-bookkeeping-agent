@@ -126,6 +126,18 @@ def _classify(txtype, party, desc):
     return "Other", "Review", "uncategorized PM payment — set a category in the Import tab"
 
 
+def _address_head():
+    """-> (regex for the address minus its last word, that last word), or (None, None).
+
+    Built from APPFOLIO_ADDRESS_RE when it's a plain run of words ("3135\\s+East\\s+...\\s+Street"),
+    so no extra private config is needed: when the address cell wraps, its last word lands on
+    the next line and the full pattern no longer matches."""
+    toks = config.APPFOLIO_ADDRESS_RE.split(r"\s+")
+    if len(toks) >= 2 and all(re.fullmatch(r"[\w.#-]+", t) for t in toks):
+        return r"\s+".join(toks[:-1]), toks[-1]
+    return None, None
+
+
 def parse_appfolio_pdf(text):
     """PDF text -> dict {sheet,label,rows,summary} or None if not an AppFolio statement."""
     low = text.lower()
@@ -138,24 +150,55 @@ def parse_appfolio_pdf(text):
     flat = re.sub(r'[ \t]+', ' ', text)
     text = _strip_boilerplate(text)
 
-    rows = []
+    MONEY = r'-?[\d,]+\.\d{2}'
+    head, suffix = _address_head()
+    recs = []   # pass 1: split every record into party / description
     for date_s, txtype, body in _split_records(text):
         try:
             d = datetime.strptime(date_s, "%m/%d/%Y")
         except ValueError:
             continue
-        nums = re.findall(r'-?[\d,]+\.\d{2}', body)
+        nums = re.findall(MONEY, body)
         if not nums:
             continue
         amount = _money(nums[-2]) if len(nums) >= 2 else _money(nums[-1])  # [amount, balance]
-        # Body text minus the trailing amount/balance, collapsed to one line.
-        clean = re.sub(r'\s+', " ", body).strip()
-        clean = re.sub(r'(-?[\d,]+\.\d{2}\s*){1,2}$', "", clean).strip()
-        # Party = tokens before the property address; description = everything after the
-        # first address occurrence (the address can repeat, e.g. "Tenant, <addr>: <desc>").
-        parts = re.split(config.APPFOLIO_ADDRESS_RE, clean, flags=re.I)
-        party = parts[0].strip(" -:") if parts else ""
-        desc = " ".join(p.strip() for p in parts[1:]).strip(" -:") if len(parts) > 1 else clean
+        flat_body = re.sub(r'\s+', " ", body).strip()
+        # A clean record ends in exactly [amount, balance]. When a cell wraps, extraction reads
+        # across columns line by line, so amounts land mid-text and name/address fragments trail
+        # after them. Strip every money token; the amount was already taken above.
+        clean_shape = len(nums) == 2 and re.search(rf'({MONEY}\s*){{2}}$', flat_body)
+        text_ = re.sub(r'\s+', " ", re.sub(MONEY, " ", flat_body)).strip()
+        # Party = tokens before the property address; description = everything after the first
+        # address occurrence (the address can repeat, e.g. "Tenant, <addr>: <desc>").
+        parts = re.split(config.APPFOLIO_ADDRESS_RE, text_, flags=re.I)
+        wrapped = False
+        if len(parts) == 1 and head and re.search(head, text_, flags=re.I):
+            parts = re.split(head, text_, flags=re.I)   # address's last word wrapped to line 2
+            wrapped = True
+        party = parts[0].strip(" -:,") if parts else ""
+        desc = " ".join(x.strip() for x in parts[1:]).strip(" -:") if len(parts) > 1 else text_
+        if wrapped:
+            desc = re.sub(rf"\b{re.escape(suffix)}\b", " ", desc, count=1, flags=re.I)
+        recs.append({"d": d, "txtype": txtype, "amount": amount, "party": party, "desc": desc,
+                     "clean": bool(clean_shape) and not wrapped})
+
+    # Pass 2: a wrapped party name ("Hoosier Homes" + "Maintenance", or a tenant list whose last
+    # name wrapped) leaves its tail inside the description. Put it back using the full names seen
+    # on clean rows of the same export.
+    known = sorted({r["party"] for r in recs if r["clean"] and r["party"]}, key=len, reverse=True)
+    rows = []
+    for r in recs:
+        party, desc = r["party"], r["desc"]
+        for full in known:
+            if len(full) > len(party) and full.lower().startswith(party.lower()) and party:
+                tail = full[len(party):].strip(" ,")
+                hit = re.search(rf"(^|\s){re.escape(tail)}(\s|$)", desc)
+                if tail and hit:
+                    desc = (desc[:hit.start()] + " " + desc[hit.end():])
+                    party = full
+                    break
+        desc = re.sub(r"\s+", " ", desc).strip(" -:")
+        txtype, amount, d = r["txtype"], r["amount"], r["d"]
         cat, btype, note = _classify(txtype, party, desc)
         # Sign follows the money, not the category: a Cash Out leaves the PM reserve even when no
         # rule recognizes it (a leasing fee, a deposit transfer) and it lands as Review. Keying the

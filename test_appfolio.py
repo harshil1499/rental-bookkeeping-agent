@@ -166,6 +166,61 @@ check("tree trimming still grounds upkeep", cat("Acme", "Tree trimming") == "Cle
 check("mowing still grounds upkeep", cat("Acme", "Mowing bills 05/11") == "Cleaning and Maintenance")
 check("water heater install is a repair, not a utility", cat("Acme", "Water heater install") == "Repairs")
 
+# --- Part 1c: wrapped cells don't scramble descriptions ------------------------------------
+# A cell that wraps makes extraction read across columns line by line: amounts land mid-text,
+# the address's last word and the rest of a name trail after them. Shapes from the real exports.
+SCRAMBLED = """AppFolio Owner Portal
+Transactions
+Total Cash In
+493.55
+Cash Out
+-90.01
+Date Type Party Property Description Amount Balance
+7/10/2026Cash Out
+Acme Maintenance
+123 Main Street
+Grass cutting
+-75.00
+1,000.00
+8/1/2026Cash In
+Jane Tenant, Bob Tenant
+123 Main Street
+Pet Fee - September
+20.00
+1,020.00
+8/1/2026Cash In
+Jane Tenant,
+123 Main Street
+Rent Income - Prepayment applied automatically
+493.55
+5,388.55
+Bob Tenant
+9/1/2026Cash Out
+Acme
+123 Main
+Citizens Energy group Service
+-15.01
+2,084.99
+Maintenance
+Street
+period: 07/9/26 - 08/3/26
+"""
+p4 = appfolio.parse_appfolio_pdf(SCRAMBLED)
+payees = [r["payee"] for r in p4["rows"]]
+check("wrapped party + address -> clean payee",
+      "Acme Maintenance — Citizens Energy group Service period: 07/9/26 - 08/3/26" in payees, repr(payees[-1]))
+check("...and it categorizes from the clean text (Utilities)",
+      p4["rows"][-1]["category"] == "Utilities", p4["rows"][-1]["category"])
+check("wrapped tenant name -> full name, no stray amounts",
+      "Jane Tenant, Bob Tenant — Rent Income - Prepayment applied automatically" in payees, repr(payees[2]))
+check("clean rows are untouched", payees[0] == "Acme Maintenance — Grass cutting"
+      and payees[1] == "Jane Tenant, Bob Tenant — Pet Fee - September", repr(payees[:2]))
+check("amounts are unchanged by the cleanup",
+      [r["amount"] for r in p4["rows"]] == [-75.0, 20.0, 493.55, -15.01])
+check("no payee carries an amount or the address", not any(
+      __import__("re").search(r"\d\.\d{2}|123 Main", x) for x in payees))
+check("still reconciles", appfolio.reconcile(p4)[0], appfolio.reconcile(p4)[1])
+
 # --- Part 2: which export gets staged -------------------------------------------------------
 NAME = "AppFolio Owner Portal _ Transactions.pdf"
 
