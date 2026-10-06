@@ -462,6 +462,11 @@ def main():
             print(f"    not used: '{src['name']}' ({src['origin']}, {len(other['rows'])} rows, "
                   f"{min(r['date_obj'] for r in other['rows']):%-m/%-d}-{appfolio.latest(other):%-m/%-d})"
                   f"{'' if ook else ' — does NOT reconcile: ' + omsg}")
+            if not ook:   # show the rows the check summed, so a mismatch can be read off the log
+                for r in sorted((r for r in other["rows"] if r["_txtype"] == "Cash Out"),
+                                key=lambda r: r["date_obj"]):
+                    print(f"        cash out {r['date_str']:>10} {r['_raw_amount']:>10,.2f}  "
+                          f"{r['category']:<24} {r['payee'][:80]}")
 
     if not groups:
         sys.exit("Nothing to process.")
