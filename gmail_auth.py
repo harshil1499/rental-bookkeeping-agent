@@ -5,9 +5,15 @@ Since ~21:00 UTC 2026-10-10 Gmail rejects the app-password login from GitHub-hos
 the login: the IMAP/SMTP code that reads and sends mail stays as it is.
 
 Env: GMAIL_USER, GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN.
-The refresh token comes from gmail_oauth_setup.py (run once, locally). The ops repo keeps its
-own copy of this logic (gmail_oauth.py) for the failure alert and the monthly reminder, which
-must work even when cloning this repo is what failed.
+The refresh token comes from gmail_oauth_setup.py (run once, locally).
+
+Local runs on the Mac have no OAuth secrets: the portfolio dashboard build imports
+still_needed / email_docs with only GMAIL_APP_PASSWORD (from property-management's
+.env.optimizer). Gmail still accepts that from home, so with no OAuth env set, the login falls
+back to it. CI never sets GMAIL_APP_PASSWORD, so runners always use OAuth.
+
+The ops repo keeps its own copy of the OAuth logic (gmail_oauth.py) for the failure alert and
+the monthly reminder, which must work even when cloning this repo is what failed.
 
   python gmail_auth.py --check   # sign in over IMAP + SMTP, open INBOX read-only, log out.
                                  # Reads no mail, sends no mail.
@@ -30,8 +36,12 @@ ENV = ("GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_OAUTH_REFRES
 _TOKEN = None  # per-process memo; an access token lasts an hour and a run takes under 20 min
 
 
-def configured():
+def _oauth():
     return all(os.environ.get(k) for k in ENV)
+
+
+def configured():
+    return _oauth() or bool(os.environ.get("GMAIL_APP_PASSWORD"))
 
 
 def access_token(client_id, client_secret, refresh_token):
@@ -76,12 +86,25 @@ def _responder(first):
     return respond
 
 
+def _app_password():
+    """The local fallback: an app password, only when no OAuth is configured."""
+    return None if _oauth() else os.environ.get("GMAIL_APP_PASSWORD")
+
+
 def imap_login(m, user, tok=None):
+    pw = None if tok else _app_password()
+    if pw:
+        m.login(user, pw)
+        return
     m.authenticate("XOAUTH2", _responder(xoauth2(user, tok or token()).encode()))
 
 
 def smtp_login(s, user, tok=None):
     """Call after starttls()."""
+    pw = None if tok else _app_password()
+    if pw:
+        s.login(user, pw)
+        return
     s.ehlo_or_helo_if_needed()   # STARTTLS resets the session; Gmail wants EHLO before AUTH
     s.auth("XOAUTH2", _responder(xoauth2(user, tok or token())), initial_response_ok=True)
 

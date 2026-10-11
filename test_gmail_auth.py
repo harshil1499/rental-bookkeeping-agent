@@ -13,6 +13,8 @@ Gmail has rejected the app-password login from GitHub-hosted runners since ~21:0
   3. **One token refresh per run.** Every login in a poll shares it.
   4. **A failed refresh says why** (Google's error body, e.g. invalid_grant = re-run
      gmail_oauth_setup.py) and never echoes the refresh token or client secret.
+  5. **The app password is a local-only fallback.** Used only when no OAuth env is set (the
+     dashboard build on the Mac); with OAuth set, OAuth always wins.
 
 Needs no secrets and no network: the token endpoint is stubbed.
 
@@ -110,6 +112,41 @@ check("failed refresh never echoes a secret", not any(v in msg for v in SECRETS.
 check("configured() true with all three set", g.configured())
 os.environ["GMAIL_OAUTH_REFRESH_TOKEN"] = ""
 check("configured() false when one is blank", not g.configured())
+
+
+# Local fallback (the dashboard build on the Mac): app password only when OAuth isn't set.
+class FakeIMAP:
+    def __init__(self):
+        self.calls = []
+
+    def login(self, user, pw):
+        self.calls.append(("login", user, pw))
+
+    def authenticate(self, mech, obj):
+        self.calls.append(("authenticate", mech))
+
+
+class FakeSMTP2(FakeSMTP):
+    def login(self, user, pw):
+        self.calls.append(("login", user, pw))
+
+
+os.environ["GMAIL_APP_PASSWORD"] = "apppw"
+check("configured() true with only an app password", g.configured())
+m, s = FakeIMAP(), FakeSMTP2()
+g.imap_login(m, "owner@example.com")
+g.smtp_login(s, "owner@example.com")
+check("no OAuth env: IMAP + SMTP use the app password",
+      m.calls == [("login", "owner@example.com", "apppw")]
+      and s.calls == [("login", "owner@example.com", "apppw")], f"{m.calls} {s.calls}")
+
+os.environ["GMAIL_OAUTH_REFRESH_TOKEN"] = "rtoken"
+g._TOKEN = "AT"
+m, s = FakeIMAP(), FakeSMTP2()
+g.imap_login(m, "owner@example.com")
+g.smtp_login(s, "owner@example.com")
+check("OAuth env set: OAuth wins even with an app password",
+      m.calls == [("authenticate", "XOAUTH2")] and s.calls[-1][0] == "XOAUTH2", f"{m.calls} {s.calls}")
 
 print()
 if fails:
