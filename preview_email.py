@@ -20,7 +20,7 @@ NO ledger write and NO file moves happen here. The human still gates booking —
 the `confirm` reply and run promote. Row numbering is global and deterministic (SHEETS order, then
 Import-tab order) so a reply's row number maps back to a staged row.
 
-Auth: Gmail app password in GMAIL_USER / GMAIL_APP_PASSWORD; Google service account via config.py.
+Auth: Gmail OAuth via gmail_auth.py (GMAIL_USER + GMAIL_OAUTH_*); Google service account via config.py.
 Set PREVIEW_TO to override the recipient (defaults to the Gmail account, i.e. send-to-self).
 """
 import hashlib
@@ -39,6 +39,7 @@ warnings.filterwarnings("ignore")
 
 import config
 import email_docs
+import gmail_auth
 import sources
 import still_needed
 import mailbox_state
@@ -47,7 +48,6 @@ from capture import open_sheet
 from import_relay import drive_service, load_drive_config, list_inbox_files
 
 USER = os.environ["GMAIL_USER"]
-PW = os.environ["GMAIL_APP_PASSWORD"]
 TO = os.environ.get("PREVIEW_TO", USER)
 # FORCE=1 re-sends even if this inbox set was already previewed (manual testing only —
 # the scheduled runs must never set it, or every poll would email).
@@ -105,7 +105,7 @@ STAGED_SUBJECT = "Staged, nothing to book"
 def record_staged(h):
     m = imaplib.IMAP4_SSL("imap.gmail.com")
     try:
-        m.login(USER, PW)
+        gmail_auth.imap_login(m, USER)
         return mailbox_state.record(m, USER, f"{STAGED_SUBJECT} [{h}]")
     finally:
         try:
@@ -120,7 +120,7 @@ def already_previewed(h):
     'never previewed', which re-sent an identical email; see mailbox_state.py."""
     m = imaplib.IMAP4_SSL("imap.gmail.com")
     try:
-        m.login(USER, PW)
+        gmail_auth.imap_login(m, USER)
         return mailbox_state.exists(m, "SUBJECT", mailbox_state.q(f"[{h}]"))
     finally:
         try:
@@ -360,7 +360,7 @@ def send(subject, text, html):
     ctx = ssl.create_default_context()
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls(context=ctx)
-        s.login(USER, PW)
+        gmail_auth.smtp_login(s, USER)
         s.send_message(msg)
 
 

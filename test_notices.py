@@ -24,7 +24,8 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 
 os.environ.setdefault("GMAIL_USER", "owner@example.com")
-os.environ.setdefault("GMAIL_APP_PASSWORD", "unused")
+for _k in ("GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_OAUTH_REFRESH_TOKEN"):
+    os.environ.setdefault(_k, "unused")
 
 import confirm_and_book as cb  # noqa: E402
 
@@ -346,8 +347,9 @@ except ImportError as e:
 else:
     def docs(msgs):
         fake = FakeIMAP(msgs)
-        fake.login = fake.logout = lambda *a: ("OK", [b""])
-        email_docs.USER, email_docs.PW, email_docs._CACHE = OWNER, "x", None
+        fake.authenticate = fake.logout = lambda *a: ("OK", [b""])
+        email_docs.USER, email_docs._CACHE = OWNER, None
+        email_docs.gmail_auth._TOKEN = "unused"   # no token refresh over the network
         email_docs.imaplib.IMAP4_SSL = lambda *_a, **_k: fake
         return sorted(s["name"] for s in quiet(email_docs.fetch))
     real_ssl = email_docs.imaplib.IMAP4_SSL

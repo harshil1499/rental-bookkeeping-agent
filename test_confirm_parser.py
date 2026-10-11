@@ -24,9 +24,8 @@ from email import message_from_bytes
 from email.header import Header
 from email.message import EmailMessage
 
-# intent() is pure, but the module reads Gmail creds at import time.
+# intent() is pure, but the module reads the Gmail user at import time.
 os.environ.setdefault("GMAIL_USER", "test@example.com")
-os.environ.setdefault("GMAIL_APP_PASSWORD", "unused")
 
 from confirm_and_book import HASH_RE, header_text, intent, plain_body  # noqa: E402
 

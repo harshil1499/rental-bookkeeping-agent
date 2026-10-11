@@ -134,10 +134,11 @@ def local_today():
 
 def already_nudged(subj):
     import imaplib
+    import gmail_auth
     import mailbox_state
     m = imaplib.IMAP4_SSL("imap.gmail.com")
     try:
-        m.login(os.environ["GMAIL_USER"], os.environ["GMAIL_APP_PASSWORD"])
+        gmail_auth.imap_login(m, os.environ["GMAIL_USER"])
         return mailbox_state.exists(m, "SUBJECT", mailbox_state.q(subj))
     finally:
         try:

@@ -1,45 +1,63 @@
-"""Gmail sign-in with OAuth (XOAUTH2) over IMAP and SMTP.
+"""Gmail sign-in with OAuth (XOAUTH2) over IMAP and SMTP. Stdlib only.
 
 Since ~21:00 UTC 2026-10-10 Gmail rejects the app-password login from GitHub-hosted runners
 ("Invalid credentials") while the same password works from a home Mac. OAuth replaces only
 the login: the IMAP/SMTP code that reads and sends mail stays as it is.
 
 Env: GMAIL_USER, GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN.
-The refresh token comes from gmail_oauth_setup.py (run once, locally).
+The refresh token comes from gmail_oauth_setup.py (run once, locally). The ops repo keeps its
+own copy of this logic (gmail_oauth.py) for the failure alert and the monthly reminder, which
+must work even when cloning this repo is what failed.
 
   python gmail_auth.py --check   # sign in over IMAP + SMTP, open INBOX read-only, log out.
                                  # Reads no mail, sends no mail.
 """
 import imaplib
+import json
 import os
 import smtplib
 import ssl
 import sys
-
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
+import urllib.error
+import urllib.parse
+import urllib.request
 
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 # The only scope Gmail accepts for IMAP/SMTP — the same full-mailbox reach the app password had.
 SCOPES = ["https://mail.google.com/"]
+ENV = ("GMAIL_OAUTH_CLIENT_ID", "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_OAUTH_REFRESH_TOKEN")
+
+_TOKEN = None  # per-process memo; an access token lasts an hour and a run takes under 20 min
+
+
+def configured():
+    return all(os.environ.get(k) for k in ENV)
 
 
 def access_token(client_id, client_secret, refresh_token):
     """Trade the long-lived refresh token for a one-hour access token."""
-    creds = Credentials(None, refresh_token=refresh_token, client_id=client_id,
-                        client_secret=client_secret, token_uri=TOKEN_URI)
-    creds.refresh(Request())
-    return creds.token
+    body = urllib.parse.urlencode({"client_id": client_id, "client_secret": client_secret,
+                                   "refresh_token": refresh_token,
+                                   "grant_type": "refresh_token"}).encode()
+    try:
+        with urllib.request.urlopen(TOKEN_URI, body, timeout=30) as r:
+            return json.load(r)["access_token"]
+    except urllib.error.HTTPError as e:
+        # Google's error body names the cause and holds no secret. "invalid_grant" = the refresh
+        # token expired or was revoked: re-run gmail_oauth_setup.py.
+        detail = e.read()[:300].decode("utf-8", "replace")
+        raise RuntimeError(f"Gmail OAuth token refresh failed: HTTP {e.code} {detail}") from None
 
 
-def env_access_token():
-    return access_token(os.environ["GMAIL_OAUTH_CLIENT_ID"],
-                        os.environ["GMAIL_OAUTH_CLIENT_SECRET"],
-                        os.environ["GMAIL_OAUTH_REFRESH_TOKEN"])
+def token():
+    global _TOKEN
+    if _TOKEN is None:
+        _TOKEN = access_token(*(os.environ[k] for k in ENV))
+    return _TOKEN
 
 
-def xoauth2(user, token):
-    return f"user={user}\x01auth=Bearer {token}\x01\x01"
+def xoauth2(user, tok):
+    return f"user={user}\x01auth=Bearer {tok}\x01\x01"
 
 
 def _responder(first):
@@ -58,20 +76,20 @@ def _responder(first):
     return respond
 
 
-def imap_login(m, user, token):
-    m.authenticate("XOAUTH2", _responder(xoauth2(user, token).encode()))
+def imap_login(m, user, tok=None):
+    m.authenticate("XOAUTH2", _responder(xoauth2(user, tok or token()).encode()))
 
 
-def smtp_login(s, user, token):
+def smtp_login(s, user, tok=None):
     """Call after starttls()."""
     s.ehlo_or_helo_if_needed()   # STARTTLS resets the session; Gmail wants EHLO before AUTH
-    s.auth("XOAUTH2", _responder(xoauth2(user, token)), initial_response_ok=True)
+    s.auth("XOAUTH2", _responder(xoauth2(user, tok or token())), initial_response_ok=True)
 
 
-def check(user, token):
+def check(user, tok):
     """Sign in over IMAP and SMTP. Opens INBOX read-only; reads and sends nothing."""
     m = imaplib.IMAP4_SSL("imap.gmail.com")
-    imap_login(m, user, token)
+    imap_login(m, user, tok)
     typ, _ = m.select("INBOX", readonly=True)
     m.logout()
     if typ != "OK":
@@ -80,11 +98,11 @@ def check(user, token):
 
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls(context=ssl.create_default_context())
-        smtp_login(s, user, token)
+        smtp_login(s, user, tok)
     print("SMTP: OAuth login OK (nothing sent)")
 
 
 if __name__ == "__main__":
     if sys.argv[1:] != ["--check"]:
         sys.exit(__doc__)
-    check(os.environ["GMAIL_USER"], env_access_token())
+    check(os.environ["GMAIL_USER"], token())

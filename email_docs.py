@@ -20,7 +20,7 @@ Drive inbox waiting for their CSV.
 Only attachments on a message FROM the owner carrying one of our own subjects are read, so a
 random email with a spreadsheet attached can never inject rows.
 
-Auth: Gmail app password in GMAIL_USER / GMAIL_APP_PASSWORD. If those aren't set (a local run),
+Auth: Gmail OAuth via gmail_auth.py (GMAIL_USER + GMAIL_OAUTH_*). If those aren't set (a local run),
 this yields nothing and the Drive path works exactly as before.
 """
 import email as emaillib
@@ -33,10 +33,10 @@ warnings.filterwarnings("ignore")
 
 import fitz  # pymupdf, to read attached statement PDFs
 
+import gmail_auth
 import mailbox_state
 
 USER = os.environ.get("GMAIL_USER", "")
-PW = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 # Only messages carrying one of our own subjects are considered. "Didn't book" must match
 # confirm_and_book.NOTICE_SUBJECT (not imported: that module needs Gmail creds at import, and this
@@ -52,7 +52,7 @@ _CACHE = None  # per-process memo; a single poll asks for these more than once
 
 
 def available():
-    return bool(USER and PW)
+    return bool(USER) and gmail_auth.configured()
 
 
 def _q(s):
@@ -106,7 +106,7 @@ def fetch():
     found, m = {}, None
     try:
         m = imaplib.IMAP4_SSL("imap.gmail.com")
-        m.login(USER, PW)
+        gmail_auth.imap_login(m, USER)
         # Searched across archive and trash, not just INBOX. These attachments are pipeline
         # INPUTS, and the docstring above promises they stay in the dataset permanently —
         # an INBOX-only read would quietly break that the first time you archive the email

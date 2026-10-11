@@ -34,7 +34,7 @@ preview hash, and containing the explicit word `confirm`, will book anything. Th
 From header plus knowledge of the hash — strong in practice for a personal mailbox, but not
 cryptographic. Worth knowing, since this is the one job that writes dollar figures.
 
-Auth: Gmail app password in GMAIL_USER / GMAIL_APP_PASSWORD; service account via config.py.
+Auth: Gmail OAuth via gmail_auth.py (GMAIL_USER + GMAIL_OAUTH_*); service account via config.py.
 """
 import email as emaillib
 import hashlib
@@ -56,10 +56,10 @@ warnings.filterwarnings("ignore")
 
 # Stdlib-only itself, so it may be imported at module level — the parser tests run in CI
 # before config.py exists, and this module has to stay importable without it.
+import gmail_auth
 import mailbox_state
 
 USER = os.environ["GMAIL_USER"]
-PW = os.environ["GMAIL_APP_PASSWORD"]
 HERE = os.path.dirname(os.path.abspath(__file__)) or "."
 
 PREVIEW_SUBJECT = "Bookkeeping preview"
@@ -119,7 +119,7 @@ def header_text(msg, name):
 
 def imap_connect():
     m = imaplib.IMAP4_SSL("imap.gmail.com")
-    m.login(USER, PW)
+    gmail_auth.imap_login(m, USER)
     m.select("INBOX")
     return m
 
@@ -713,7 +713,7 @@ def send(subject, text, html):
     ctx = ssl.create_default_context()
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls(context=ctx)
-        s.login(USER, PW)
+        gmail_auth.smtp_login(s, USER)
         s.send_message(msg)
 
 
